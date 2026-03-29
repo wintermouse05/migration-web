@@ -22,6 +22,7 @@ import org.example.migrationdbweb.migratetool.MetadataExtractor;
 import org.example.migrationdbweb.migratetool.SqlDialect;
 import org.example.migrationdbweb.migratetool.SqlGenerator;
 import org.example.migrationdbweb.migratetool.TableDefinition;
+import org.example.migrationdbweb.migratetool.ViewDefinition;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.messaging.simp.SimpMessagingTemplate;
 import org.springframework.scheduling.annotation.Async;
@@ -164,8 +165,23 @@ public class MigrationWebWorkerService {
                 if (!dataOnly) {
                     broadcastStatus(88, "RUNNING", "Dang tao foreign keys...", true);
                     runAddForeignKeysPhase(targetConn, tableDefinitions, targetDialect);
+                    broadcastStatus(90, "RUNNING", "Hoan tat tao foreign keys.", true);
                 } else {
-                    broadcastStatus(95, "RUNNING", "Bo qua tao foreign keys (DATA_ONLY).", true);
+                    broadcastStatus(90, "RUNNING", "Bo qua tao foreign keys (DATA_ONLY).", true);
+                }
+
+                // ─── PHASE: CREATE VIEWS ─────────────────────────────────────────
+                // NOTE: View phu thuoc table nen phai tao SAU cac bang va FK.
+                // Neu target la Oracle, bo qua view vi Oracle->Oracle thi view
+                // da nam trong table definition.
+                if (options.isMigrateViews() && !dataOnly) {
+                    runCreateViewsPhase(
+                            sourceConn, targetConn,
+                            sourceSchema, targetSchema,
+                            request.getSource().getType(),
+                            targetDialect,
+                            options
+                    );
                 }
 
                 broadcastStatus(100, "COMPLETED", "[THANH CONG] Toan bo tien trinh Migration da hoan tat!", false);
@@ -366,5 +382,209 @@ public class MigrationWebWorkerService {
         return "42804".equals(sqlState)
                 || message.contains("ora-02267")
                 || (message.contains("foreign key") && message.contains("incompatible"));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // VIEW MIGRATION METHODS
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /**
+     * Phase CREATE VIEWS — chạy SAU khi tất cả tables đã được tạo.
+     * Table luôn luôn được migrate trước view.
+     */
+    private void runCreateViewsPhase(
+            Connection sourceConn,
+            Connection targetConn,
+            String sourceSchema,
+            String targetSchema,
+            DatabaseType sourceDbType,
+            SqlDialect targetDialect,
+            MigrationRequest.MigrationOptions options
+    ) throws SQLException {
+        broadcastStatus(92, "RUNNING", "Bat dau phase migrate views...", true);
+
+        MetadataExtractor extractor = new MetadataExtractor();
+
+        // 1. Lấy toàn bộ view definitions + topological sort
+        List<ViewDefinition> sortedViews;
+        try {
+            sortedViews = extractor.extractViewDefinitionsWithDependencySort(
+                    sourceConn, sourceSchema, sourceDbType
+            );
+        } catch (IllegalStateException e) {
+            // Circular dependency → broadcast warning nhưng không fail job
+            System.err.println("WARN: " + e.getMessage());
+            broadcastStatus(92, "RUNNING",
+                    "[WARN] Circular view dependency: " + e.getMessage() + ". Bo qua migrate views.", true);
+            return;
+        }
+
+        if (sortedViews.isEmpty()) {
+            broadcastStatus(92, "RUNNING", "Khong co view nao trong source schema de migrate.", true);
+            return;
+        }
+
+        // 2. Apply include/exclude filter
+        Set<String> includeViews = parseCsvTableSet(options.getIncludeViewsCsv());
+        Set<String> excludeViews = parseCsvTableSet(options.getExcludeViewsCsv());
+        List<ViewDefinition> filteredViews = applyViewFilters(sortedViews, includeViews, excludeViews);
+
+        if (filteredViews.isEmpty()) {
+            broadcastStatus(92, "RUNNING",
+                    "Khong co view nao phu hop include/exclude filter.", true);
+            return;
+        }
+
+        broadcastStatus(93, "RUNNING",
+                "Tim thay " + filteredViews.size() + " views (da sort theo dependency).", true);
+
+        // 3. Tạo views tuần tự
+        int successCount = 0;
+        int skipCount = 0;
+        int errorCount = 0;
+        List<String> errors = new ArrayList<>();
+
+        for (int i = 0; i < filteredViews.size(); i++) {
+            ViewDefinition vd = filteredViews.get(i);
+            String viewName = vd.getViewName();
+
+            int baseProgress = 93;
+            int progressRange = 7; // từ 93 -> 100
+            broadcastStatus(
+                    baseProgress + (int) ((i * progressRange * 1.0f) / filteredViews.size()),
+                    "RUNNING",
+                    "Dang tao view: " + viewName + " (" + (i + 1) + "/" + filteredViews.size() + ")",
+                    true
+            );
+
+            try {
+                boolean created = createSingleView(targetConn, targetDialect, vd,
+                        sourceSchema, targetSchema, options.isReplaceExistingViews());
+
+                if (created) {
+                    successCount++;
+                    System.out.println("  [VIEW] Created: " + viewName);
+                } else {
+                    skipCount++;
+                    System.out.println("  [VIEW] Skipped (already exists): " + viewName);
+                }
+            } catch (SQLException e) {
+                errorCount++;
+                String errorMsg = viewName + ": " + e.getMessage();
+                errors.add(errorMsg);
+                System.err.println("  [VIEW] Error creating " + viewName + ": " + e.getMessage());
+                // Tiếp tục với view tiếp theo — không fail cả job
+            }
+        }
+
+        // 4. Tổng kết
+        String summary = String.format(
+                "Hoan tat migrate views: %d tao moi, %d skip, %d loi. %s",
+                successCount, skipCount, errorCount,
+                errorCount > 0 ? "Loi: " + errors : ""
+        );
+        broadcastStatus(100, errorCount > 0 ? "COMPLETED_WITH_ERRORS" : "RUNNING", summary, false);
+    }
+
+    /**
+     * Tạo một view duy nhất. Trả về true nếu tạo mới, false nếu skip.
+     */
+    private boolean createSingleView(
+            Connection targetConn,
+            SqlDialect targetDialect,
+            ViewDefinition vd,
+            String sourceSchema,
+            String targetSchema,
+            boolean replaceExisting
+    ) throws SQLException {
+        // 1. Replace schema trong selectClause nếu source != target
+        if (!sourceSchema.equalsIgnoreCase(targetSchema)) {
+            String replaced = replaceSchemaInClause(vd.getSelectClause(), sourceSchema, targetSchema);
+            vd = ViewDefinition.builder()
+                    .viewName(vd.getViewName())
+                    .schema(vd.getSchema())
+                    .sourceDialect(vd.getSourceDialect())
+                    .selectClause(replaced)
+                    .checkOption(vd.getCheckOption())
+                    .sourceSchema(sourceSchema)
+                    .targetSchema(targetSchema)
+                    .build();
+        } else {
+            vd.setSourceSchema(sourceSchema);
+            vd.setTargetSchema(targetSchema);
+        }
+
+        // 2. Build SQL
+        String createSql = targetDialect.buildCreateViewSql(vd);
+        if (createSql == null || createSql.isBlank()) {
+            throw new SQLException("Cannot build CREATE VIEW SQL for: " + vd.getViewName());
+        }
+        createSql = normalizeSqlForJdbc(createSql);
+
+        // 3. Execute
+        try (Statement stmt = targetConn.createStatement()) {
+            if (replaceExisting) {
+                // DROP trước (nếu tồn tại)
+                try {
+                    String dropSql = "DROP VIEW IF EXISTS " + targetDialect.quoteIdentifier(vd.getViewName());
+                    stmt.execute(dropSql);
+                } catch (SQLException ignored) {
+                    // ignore if not exists
+                }
+            }
+
+            stmt.execute(createSql);
+            return true;
+
+        } catch (SQLException e) {
+            if (isViewAlreadyExistsError(e)) {
+                // replaceExisting = false → skip
+                return false;
+            }
+            throw e;
+        }
+    }
+
+    /**
+     * Replace source schema prefix trong SELECT clause.
+     * Ví dụ: "SELECT * FROM SCOTT.DEPT" → "SELECT * FROM PUBLIC.DEPT"
+     */
+    private String replaceSchemaInClause(String clause, String sourceSchema, String targetSchema) {
+        if (clause == null || sourceSchema == null || targetSchema == null) {
+            return clause;
+        }
+        // Case-insensitive replace "SOURCE_SCHEMA." thành "TARGET_SCHEMA."
+        return clause.replaceAll(
+                "(?i)" + sourceSchema + "\\.",
+                targetSchema + "."
+        );
+    }
+
+    private List<ViewDefinition> applyViewFilters(
+            List<ViewDefinition> allViews,
+            Set<String> includeViews,
+            Set<String> excludeViews
+    ) {
+        List<ViewDefinition> filtered = new ArrayList<>();
+        for (ViewDefinition vd : allViews) {
+            String normalized = vd.getViewName().toUpperCase(Locale.ROOT);
+            if (!includeViews.isEmpty() && !includeViews.contains(normalized)) {
+                continue;
+            }
+            if (excludeViews.contains(normalized)) {
+                continue;
+            }
+            filtered.add(vd);
+        }
+        return filtered;
+    }
+
+    private static boolean isViewAlreadyExistsError(SQLException e) {
+        String sqlState = e.getSQLState();
+        String message = e.getMessage() == null ? "" : e.getMessage().toLowerCase(Locale.ROOT);
+        return "42P06".equals(sqlState)               // Postgres view exists
+                || message.contains("already exists")
+                && message.contains("view")
+                || message.contains("ora-00955");    // Oracle name is already used by an existing object
     }
 }

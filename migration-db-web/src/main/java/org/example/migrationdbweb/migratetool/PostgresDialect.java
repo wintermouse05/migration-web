@@ -155,4 +155,31 @@ public class PostgresDialect implements SqlDialect {
 
         return alterStatements;
     }
+
+    @Override
+    public String buildCreateViewSql(ViewDefinition viewDef) {
+        // Postgres: pg_get_viewdef trả về SELECT clause thuần (không có CREATE VIEW)
+        // Cần gắn CREATE OR REPLACE VIEW ... AS
+        String select = viewDef.getSelectClause();
+        if (select == null || select.isBlank()) {
+            return null;
+        }
+        select = select.trim();
+        // Bỏ dấu ; cuối nếu có (pg_get_viewdef có thể trả về)
+        if (select.endsWith(";")) {
+            select = select.substring(0, select.length() - 1);
+        }
+
+        StringBuilder sql = new StringBuilder();
+        sql.append("CREATE OR REPLACE VIEW ");
+        sql.append(quoteIdentifier(viewDef.getViewName()));
+        sql.append(" AS\n");
+        sql.append(select);
+
+        if (viewDef.getCheckOption() != null && !viewDef.getCheckOption().isBlank()) {
+            sql.append("\nWITH ").append(viewDef.getCheckOption()).append(" CHECK OPTION");
+        }
+
+        return sql.toString();
+    }
 }

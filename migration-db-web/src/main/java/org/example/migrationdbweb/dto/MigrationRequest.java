@@ -19,6 +19,23 @@ public class MigrationRequest {
         private int limit;
         private String includeTablesCsv = "";
         private String excludeTablesCsv = "";
+
+        // ─── View migration options ───────────────────────────────
+        /** Bật migrate view (table luôn luôn migrate trước view) */
+        private boolean migrateViews = false;
+
+        /** Chỉ migrate những view trong danh sách, bỏ trống = tất cả */
+        private String includeViewsCsv = "";
+
+        /** Loại trừ những view khỏi migration */
+        private String excludeViewsCsv = "";
+
+        /**
+         * Khi view đã tồn tại ở target:
+         * - true:  DROP VIEW + CREATE (thay thế hoàn toàn)
+         * - false: skip, không làm gì
+         */
+        private boolean replaceExistingViews = false;
     }
 
 }

@@ -4,6 +4,7 @@ import java.sql.Types;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
+import java.util.regex.Pattern;
 
 public class OracleDialect implements SqlDialect {
 
@@ -125,5 +126,35 @@ public class OracleDialect implements SqlDialect {
         }
 
         return alterStatements;
+    }
+
+    @Override
+    public String buildCreateViewSql(ViewDefinition viewDef) {
+        // Oracle USER_VIEWS.TEXT chứa "CREATE [OR REPLACE] ... VIEW ... AS SELECT ..."
+        // Đã là DDL đầy đủ, chỉ cần xử lý schema replacement + cleanup
+        String text = viewDef.getSelectClause();
+        if (text == null || text.isBlank()) {
+            return null;
+        }
+        text = text.trim();
+
+        // Replace source schema bằng target schema nếu khác nhau
+        String sourceSchema = viewDef.getSourceSchema();
+        String targetSchema = viewDef.getTargetSchema();
+        if (sourceSchema != null && targetSchema != null
+                && !sourceSchema.equalsIgnoreCase(targetSchema)) {
+            // Replace "SOURCE_SCHEMA." thành "TARGET_SCHEMA."
+            text = text.replaceAll(
+                    "(?i)" + Pattern.quote(sourceSchema) + "\\.",
+                    targetSchema + "."
+            );
+        }
+
+        // Oracle TEXT có thể kết thúc bằng dấu ;
+        if (text.endsWith(";")) {
+            text = text.substring(0, text.length() - 1);
+        }
+
+        return text;
     }
 }
