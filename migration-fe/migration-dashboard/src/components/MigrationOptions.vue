@@ -59,6 +59,47 @@
         />
       </label>
     </div>
+
+    <!-- View Migration Options -->
+    <div class="section-divider">
+      <h3>View Migration</h3>
+    </div>
+
+    <div class="options-grid">
+      <label class="checkbox-item">
+        <input v-model="localOptions.migrateViews" type="checkbox" />
+        Migrate views
+      </label>
+
+      <label class="checkbox-item">
+        <input
+          v-model="localOptions.replaceExistingViews"
+          type="checkbox"
+          :disabled="!localOptions.migrateViews"
+        />
+        Thay the views da ton tai (drop + create)
+      </label>
+
+      <label class="field">
+        <span>Include view (CSV)</span>
+        <input
+          v-model.trim="localOptions.includeViewsCsv"
+          type="text"
+          :disabled="!localOptions.migrateViews"
+          placeholder="view_users,view_orders"
+        />
+      </label>
+
+      <label class="field">
+        <span>Exclude view (CSV)</span>
+        <input
+          v-model.trim="localOptions.excludeViewsCsv"
+          type="text"
+          :disabled="!localOptions.migrateViews"
+          placeholder="view_temp"
+        />
+      </label>
+    </div>
   </section>
 </template>
 
@@ -166,5 +207,19 @@ label {
 .field input:focus {
   border-color: #2d7ef7;
   box-shadow: 0 0 0 4px rgba(45, 126, 247, 0.14);
+}
+
+.section-divider {
+  border-top: 1px dashed #d9d5cd;
+  margin: 12px 0 10px;
+  padding-top: 12px;
+}
+
+.section-divider h3 {
+  color: #2d7ef7;
+  font-family: 'Space Grotesk', sans-serif;
+  font-size: 0.92rem;
+  font-weight: 700;
+  margin: 0 0 2px;
 }
 </style>

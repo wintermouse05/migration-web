@@ -98,7 +98,12 @@ const options = ref({
   copyNewOnly: false,
   limit: 0,
   includeTablesCsv: '',
-  excludeTablesCsv: ''
+  excludeTablesCsv: '',
+  // View migration options
+  migrateViews: false,
+  replaceExistingViews: false,
+  includeViewsCsv: '',
+  excludeViewsCsv: ''
 });
 
 const sourceTestState = ref({ status: 'idle', message: '' });
