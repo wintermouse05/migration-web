@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "WebSearch",
+      "Bash(Get-ChildItem -Path \"C:\\\\Users\\\\dongdd\\\\Documents\\\\Development\\\\migration-web\\\\migration-fe\\\\migration-dashboard\" -Force)",
+      "Bash(Select-Object Name, Mode)"
+    ]
+  }
+}
