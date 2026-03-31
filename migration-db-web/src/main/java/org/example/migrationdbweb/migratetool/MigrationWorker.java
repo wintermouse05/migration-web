@@ -68,7 +68,7 @@ public class MigrationWorker extends SwingWorker<Void, String> {
     }
 
     /**
-     * CHẠY DƯỚI BACKGROUND THREAD (Không được thao tác UI ềEđây)
+     * CHẠY DƯỚI BACKGROUND THREAD (Không được thao tác UI ở đây)
      */
     @Override
     protected Void doInBackground() throws Exception {
