@@ -3,7 +3,33 @@
     "allow": [
       "WebSearch",
       "Bash(Get-ChildItem -Path \"C:\\\\Users\\\\dongdd\\\\Documents\\\\Development\\\\migration-web\\\\migration-fe\\\\migration-dashboard\" -Force)",
-      "Bash(Select-Object Name, Mode)"
+      "Bash(Select-Object Name, Mode)",
+      "Bash(mvn compile:*)",
+      "Bash(findstr /i \"MigrationWebWorkerService.java DataTransferService.java MigrationRequest.java\")",
+      "WebFetch(domain:github.com)",
+      "Bash(gh api:*)",
+      "Bash(python3 -c \"import sys,json; data=json.load\\(sys.stdin\\); [print\\(t[''''path'''']\\) for t in data.get\\(''''tree'''',[]\\) if t[''''path''''].startswith\\(''''lib/''''\\)]\")",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "Bash(Get-ChildItem -Path \"C:\\\\Users\\\\dongdd\\\\Documents\\\\Development\\\\migration-web\\\\migration-db-web\" -Recurse -File)",
+      "Bash(Select-Object FullName, Length, LastWriteTime)",
+      "Bash(Format-Table -AutoSize)",
+      "Bash(cmd.exe /c \"cd /d C:\\\\Users\\\\dongdd\\\\Documents\\\\Development\\\\migration-web\\\\migration-db-web && mvn compile 2>&1 | tail -50\")",
+      "Bash(cmd.exe /c \"cd /d C:\\\\Users\\\\dongdd\\\\Documents\\\\Development\\\\migration-web\\\\migration-db-web && dir pom.xml\")",
+      "Bash(cmd.exe /c \"dir /b C:\\\\Users\\\\dongdd\\\\Documents\\\\Development\\\\migration-web\\\\migration-db-web\\\\src\\\\main\\\\java\\\\org\\\\example\\\\migrationdbweb\\\\migratetool\\\\*.java | findstr /n /i \"\"diagnostic\"\"\")",
+      "Bash(done)",
+      "Bash(curl -sL \"https://raw.githubusercontent.com/darold/ora2pg/master/lib/Ora2Pg/PLSQL.pm\" -o /tmp/PLSQL.pm)",
+      "Read(//tmp/**)",
+      "Bash(curl -sL \"https://raw.githubusercontent.com/darold/ora2pg/master/lib/Ora2Pg/Oracle.pm\" -o /tmp/Oracle.pm)",
+      "Bash(curl -sL \"https://raw.githubusercontent.com/darold/ora2pg/master/lib/Ora2Pg/Function.pm\" -o /tmp/Function.pm)",
+      "Bash(curl -sL \"https://api.github.com/repos/darold/ora2pg/contents/lib/Ora2Pg\")",
+      "Bash(python3 -c \"import json,sys; [print\\(f[''''name'''']\\) for f in json.load\\(sys.stdin\\)]\")",
+      "Bash(curl -sL \"https://raw.githubusercontent.com/darold/ora2pg/master/lib/Ora2Pg/Oracle.pm\" -o /tmp/Oracle2.pm)",
+      "Bash(curl -sL \"https://raw.githubusercontent.com/darold/ora2pg/master/lib/Ora2Pg/Function.pm\" -o /tmp/Function2.pm)",
+      "Bash(grep -nE 's/[^;]{0,300}/[a-z]*[gimsxb]*[a-z]*[;{]|\\\\btr\\\\b[^;]{0,300}[a-z]*[gimsxb]*[a-z]*[;{]' /tmp/PLSQL.pm)",
+      "Bash(grep -vE '^\\\\d+:\\\\s*//')",
+      "Bash(grep -n \"$sqlrewrite\\\\|$replace\\\\|$remove\\\\|s/\\\\|tr/\" \"C:\\\\Users\\\\dongdd\\\\Documents\\\\Development\\\\migration-web\\\\ora2pg\\\\lib\\\\Ora2Pg\\\\PLSQL.pm\")",
+      "Bash(grep -n \"$sql_rewrite\\\\|$replace\\\\|s/\\\\|tr/\" \"C:\\\\Users\\\\dongdd\\\\Documents\\\\Development\\\\migration-web\\\\ora2pg\\\\lib\\\\Ora2Pg\\\\Oracle.pm\")",
+      "Bash(grep \"s/\\\\|s///\")"
     ]
   }
 }

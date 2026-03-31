@@ -54,6 +54,15 @@ public class DataTransferService {
     }
 
     /**
+     * Constructor cho phép truyền retry policy tùy chỉnh (dùng trong web service).
+     */
+    public DataTransferService(SqlGenerator sqlGenerator, MigrationRetryPolicy retryPolicy) {
+        this.sqlGenerator = sqlGenerator;
+        this.retryPolicy = retryPolicy != null ? retryPolicy
+                : MigrationRetryPolicy.fromEnvironment();
+    }
+
+    /**
      * Chuyển dữ liệu của một bảng từ Source sang Target
      * * @param sourceConn Kết nối DB Nguồn
      * @param targetConn Kết nối DB Đích

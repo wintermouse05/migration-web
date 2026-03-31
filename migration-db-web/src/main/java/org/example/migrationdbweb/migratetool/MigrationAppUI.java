@@ -57,6 +57,11 @@ public class MigrationAppUI extends JFrame {
     private JTextField limitDataField;
     private JTextField includeTablesField, excludeTablesField;
 
+    // Advanced object migration options
+    private JCheckBox chkMigrateSequences, chkMigrateIndexes;
+    private JCheckBox chkMigrateFunctions, chkMigrateTriggers;
+    private JTextField includeViewsField, excludeViewsField;
+
     // Actions
     private JButton btnStartMigration;
     private JTextArea logArea;
@@ -192,6 +197,35 @@ public class MigrationAppUI extends JFrame {
         excludeTablesField.setToolTipText("Ví dụ: audit_log,temp_table");
         excludePanel.add(excludeTablesField);
 
+        // ─── Advanced object migration options ───────────────────────
+        JPanel advancedLabelPanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 0, 0));
+        JLabel advancedLabel = new JLabel("Đối tượng nâng cao:");
+        advancedLabel.setFont(new Font("Arial", Font.BOLD, 11));
+        advancedLabelPanel.add(advancedLabel);
+
+        chkMigrateSequences = new JCheckBox("Sequences");
+        chkMigrateIndexes    = new JCheckBox("Indexes");
+        chkMigrateFunctions  = new JCheckBox("Functions/Procedures");
+        chkMigrateTriggers   = new JCheckBox("Triggers");
+
+        JPanel advancedCheckPanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 5, 0));
+        advancedCheckPanel.add(chkMigrateSequences);
+        advancedCheckPanel.add(chkMigrateIndexes);
+        advancedCheckPanel.add(chkMigrateFunctions);
+        advancedCheckPanel.add(chkMigrateTriggers);
+
+        JPanel includeViewsPanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 0, 0));
+        includeViewsPanel.add(new JLabel("  Include Views (CSV): "));
+        includeViewsField = new JTextField("", 20);
+        includeViewsField.setToolTipText("Ví dụ: v_emp_details,v_orders_sum");
+        includeViewsPanel.add(includeViewsField);
+
+        JPanel excludeViewsPanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 0, 0));
+        excludeViewsPanel.add(new JLabel("  Exclude Views (CSV): "));
+        excludeViewsField = new JTextField("", 20);
+        excludeViewsField.setToolTipText("Ví dụ: v_temp");
+        excludeViewsPanel.add(excludeViewsField);
+
         // BềEtrí vào Panel
         gbc.gridx = 0; gbc.gridy = 0; panel.add(optCopyAll, gbc);
         gbc.gridx = 1; gbc.gridy = 0; panel.add(chkTruncateTarget, gbc);
@@ -204,6 +238,10 @@ public class MigrationAppUI extends JFrame {
 
         gbc.gridx = 0; gbc.gridy = 3; gbc.gridwidth = 2; panel.add(includePanel, gbc);
         gbc.gridx = 0; gbc.gridy = 4; gbc.gridwidth = 2; panel.add(excludePanel, gbc);
+        gbc.gridx = 0; gbc.gridy = 5; gbc.gridwidth = 2; panel.add(advancedLabelPanel, gbc);
+        gbc.gridx = 0; gbc.gridy = 6; gbc.gridwidth = 2; panel.add(advancedCheckPanel, gbc);
+        gbc.gridx = 0; gbc.gridy = 7; gbc.gridwidth = 2; panel.add(includeViewsPanel, gbc);
+        gbc.gridx = 0; gbc.gridy = 8; gbc.gridwidth = 2; panel.add(excludeViewsPanel, gbc);
         gbc.gridwidth = 1;
 
         return panel;
@@ -310,6 +348,8 @@ public class MigrationAppUI extends JFrame {
 
         Set<String> includeTables = parseCsvTableSet(includeTablesField.getText());
         Set<String> excludeTables = parseCsvTableSet(excludeTablesField.getText());
+        Set<String> includeViews  = parseCsvTableSet(includeViewsField.getText());
+        Set<String> excludeViews  = parseCsvTableSet(excludeViewsField.getText());
 
         String sourceSchema = resolveDefaultSchema(sourceConfig);
         String targetSchema = resolveDefaultSchema(targetConfig);
@@ -328,7 +368,13 @@ public class MigrationAppUI extends JFrame {
             copyNewOnly,
             limitRows,
             includeTables,
-            excludeTables
+            excludeTables,
+            chkMigrateSequences.isSelected(),
+            chkMigrateIndexes.isSelected(),
+            chkMigrateFunctions.isSelected(),
+            chkMigrateTriggers.isSelected(),
+            includeViews,
+            excludeViews
         );
 
         // 3. Lắng nghe sự thay đổi của tiến trình (Progress) đềEcập nhật thanh JProgressBar

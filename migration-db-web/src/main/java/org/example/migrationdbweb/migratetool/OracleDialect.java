@@ -128,6 +128,173 @@ public class OracleDialect implements SqlDialect {
         return alterStatements;
     }
 
+    // ─── SEQUENCE DDL ───────────────────────────────────────────────
+
+    @Override
+    public String buildCreateSequenceSql(SequenceDefinition seq) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("CREATE SEQUENCE ");
+        sb.append(quoteIdentifier(seq.getSequenceName()));
+        if (seq.getStartValue() > 0) {
+            sb.append(" START WITH ").append(seq.getStartValue());
+        }
+        if (seq.getIncrementBy() != 0) {
+            sb.append(" INCREMENT BY ").append(seq.getIncrementBy());
+        }
+        if (seq.getMinValue() != null) {
+            sb.append(" MINVALUE ").append(seq.getMinValue());
+        }
+        if (seq.getMaxValue() != null) {
+            sb.append(" MAXVALUE ").append(seq.getMaxValue());
+        }
+        if (seq.getCacheSize() != null && seq.getCacheSize() > 1) {
+            sb.append(" CACHE ").append(seq.getCacheSize());
+        } else {
+            sb.append(" NOCACHE");
+        }
+        sb.append(seq.isCycle() ? " CYCLE" : " NOCYCLE");
+        return sb.toString();
+    }
+
+    @Override
+    public List<String> buildCreateIndexSql(IndexDefinition idx) {
+        List<String> stmts = new ArrayList<>();
+        StringBuilder sb = new StringBuilder();
+
+        // Oracle BITMAP index được migrate nhưng PostgreSQL không có BITMAP
+        // → Vẫn tạo trên Oracle→Oracle, nhưng báo warning cho Oracle→PostgreSQL
+        if (!idx.isMigratable() && idx.getIndexType() == IndexDefinition.IndexType.BITMAP) {
+            // BITMAP index — Oracle only, migrate bằng cách tạo thành B-Tree
+            System.err.println("WARN: BITMAP index " + idx.getIndexName()
+                    + " cannot be migrated to PostgreSQL. Converting to B-Tree.");
+        }
+
+        sb.append(idx.isUnique() ? "CREATE UNIQUE INDEX " : "CREATE INDEX ");
+        if (idx.getIndexName() != null) {
+            sb.append(quoteIdentifier(idx.getIndexName())).append(" ");
+        }
+        sb.append("ON ").append(quoteIdentifier(idx.getTableName()));
+
+        if (idx.isExpressionIndex() && idx.getExpression() != null) {
+            sb.append(" (").append(idx.getExpression()).append(")");
+        } else {
+            appendIndexColumns(sb, idx);
+        }
+
+        if (idx.getTablespace() != null && !idx.getTablespace().isBlank()) {
+            sb.append(" TABLESPACE ").append(idx.getTablespace());
+        }
+
+        stmts.add(sb.toString());
+        return stmts;
+    }
+
+    private void appendIndexColumns(StringBuilder sb, IndexDefinition idx) {
+        sb.append(" (");
+        List<String> cols = idx.getColumns();
+        List<String> descs = idx.getDescendings();
+        for (int i = 0; i < cols.size(); i++) {
+            if (i > 0) sb.append(", ");
+            sb.append(quoteIdentifier(cols.get(i)));
+            if (descs != null && i < descs.size() && "DESC".equalsIgnoreCase(descs.get(i))) {
+                sb.append(" DESC");
+            }
+        }
+        sb.append(")");
+    }
+
+    // ─── TRIGGER DDL ───────────────────────────────────────────────
+
+    @Override
+    public List<String> buildCreateTriggerSql(TriggerDefinition trig, OracleToPgsqlTransformer transformer) {
+        List<String> stmts = new ArrayList<>();
+        if (trig == null) return stmts;
+
+        String body = trig.getTriggerBody();
+        if (body == null || body.isBlank()) {
+            return stmts;
+        }
+
+        // Ưu tiên dùng DDL gốc đã lưu trong TriggerDefinition (từ MetadataExtractor)
+        String ddl = trig.getDdlText();
+        if (ddl == null || ddl.isBlank()) {
+            // Fallback: build từ TriggerDefinition fields
+            ddl = buildOracleTriggerFromDefinition(trig);
+        } else {
+            // DDL gốc có sẵn — chỉ replace schema nếu cần
+            if (trig.getSourceSchema() != null && trig.getTargetSchema() != null
+                    && !trig.getSourceSchema().equalsIgnoreCase(trig.getTargetSchema())) {
+                ddl = ddl.replaceAll(
+                        "(?i)" + Pattern.quote(trig.getSourceSchema()) + "\\.",
+                        trig.getTargetSchema() + "."
+                );
+            }
+        }
+
+        // Bỏ dấu ; cuối
+        if (ddl.endsWith(";")) {
+            ddl = ddl.substring(0, ddl.length() - 1);
+        }
+
+        stmts.add(ddl);
+        return stmts;
+    }
+
+    /**
+     * Lấy trigger DDL đầy đủ từ Oracle qua DBMS_METADATA.GET_DDL.
+     *
+     * DBMS_METADATA.GET_DDL trả về CLOB chứa câu lệnh CREATE TRIGGER hoàn chỉnh
+     * bao gồm: CREATE [OR REPLACE] TRIGGER, timing, event, table, WHEN clause, body.
+     *
+     * @param schema       schema chứa trigger
+     * @param triggerName  tên trigger
+     * @return full CREATE TRIGGER DDL, hoặc null nếu không lấy được
+     */
+    private String extractOracleTriggerDdl(String schema, String triggerName) {
+        // NOTE: vì OracleDialect không giữ Connection riêng,
+        // việc lấy DDL gốc được thực hiện trong MetadataExtractor
+        // và lưu vào TriggerDefinition.ddlText.
+        // Method này hiện chỉ trả về null, dùng làm placeholder.
+        return null;
+    }
+
+    /**
+     * Build Oracle trigger DDL từ TriggerDefinition fields.
+     * Dùng khi không lấy được full DDL từ Oracle metadata.
+     */
+    private String buildOracleTriggerFromDefinition(TriggerDefinition trig) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("CREATE OR REPLACE TRIGGER ");
+        sb.append(quoteIdentifier(trig.getTriggerName()));
+        sb.append("\n");
+
+        // Timing
+        if (trig.getTiming() != null) {
+            sb.append(trig.getTiming().name().replace("_", " "));
+            sb.append(" ");
+        }
+
+        // Event
+        sb.append(trig.getTriggeringEvent());
+        sb.append(" ON ");
+        sb.append(quoteIdentifier(trig.getTableName()));
+
+        // FOR EACH ROW
+        if (trig.isRowLevel()) {
+            sb.append("\nFOR EACH ROW");
+        }
+
+        // WHEN clause
+        if (trig.hasWhenClause()) {
+            sb.append("\nWHEN (").append(trig.getWhenClause()).append(")");
+        }
+
+        sb.append("\n");
+        sb.append(trig.getTriggerBody());
+
+        return sb.toString();
+    }
+
     @Override
     public String buildCreateViewSql(ViewDefinition viewDef) {
         // Oracle USER_VIEWS.TEXT chứa "CREATE [OR REPLACE] ... VIEW ... AS SELECT ..."
@@ -157,4 +324,48 @@ public class OracleDialect implements SqlDialect {
 
         return text;
     }
-}
+
+	// ─── FUNCTION / PROCEDURE DDL ──────────────────────────────
+
+	@Override
+	public List<String> buildCreateFunctionSql(FunctionDefinition fn, OracleToPgsqlTransformer transformer) {
+		List<String> stmts = new ArrayList<>();
+		if (fn == null) return stmts;
+
+		String body = fn.getFunctionBody();
+		if (body == null || body.isBlank()) {
+			return stmts;
+		}
+
+		StringBuilder sb = new StringBuilder();
+		if (fn.isProcedure()) {
+			sb.append("CREATE OR REPLACE PROCEDURE ");
+		} else {
+			sb.append("CREATE OR REPLACE FUNCTION ");
+		}
+		sb.append(quoteIdentifier(fn.getFunctionName()));
+		sb.append("(");
+
+		List<FunctionDefinition.FunctionArgument> args = fn.getArguments();
+		for (int i = 0; i < args.size(); i++) {
+			if (i > 0) sb.append(", ");
+			FunctionDefinition.FunctionArgument arg = args.get(i);
+			if (arg.getName() != null && !arg.getName().isBlank()) {
+				sb.append(arg.getName()).append(" ");
+			}
+			sb.append(arg.getDataType());
+		}
+		sb.append(")");
+		if (fn.isFunction() && fn.getReturnType() != null) {
+			sb.append(" RETURN ").append(fn.getReturnType());
+		}
+		sb.append(" AS\n");
+		sb.append(body);
+		if (!body.trim().endsWith("/")) {
+			sb.append("\n/");
+		}
+
+		stmts.add(sb.toString());
+		return stmts;
+	}
+	}

@@ -156,6 +156,258 @@ public class PostgresDialect implements SqlDialect {
         return alterStatements;
     }
 
+    // ─── SEQUENCE DDL ───────────────────────────────────────────────
+
+    @Override
+    public String buildCreateSequenceSql(SequenceDefinition seq) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("CREATE SEQUENCE IF NOT EXISTS ");
+        sb.append(quoteIdentifier(seq.getSequenceName()));
+
+        if (seq.getStartValue() > 0) {
+            sb.append(" START WITH ").append(seq.getStartValue());
+        }
+        if (seq.getIncrementBy() != 0) {
+            sb.append(" INCREMENT BY ").append(seq.getIncrementBy());
+        }
+        if (seq.getMinValue() != null) {
+            sb.append(" MINVALUE ").append(seq.getMinValue());
+        }
+        if (seq.getMaxValue() != null) {
+            sb.append(" MAXVALUE ").append(seq.getMaxValue());
+        }
+        // PostgreSQL: CACHE >= 1, nếu null → dùng 1
+        sb.append(" CACHE ").append(seq.getCacheSize() != null ? seq.getCacheSize() : 1);
+        sb.append(seq.isCycle() ? " CYCLE" : " NO CYCLE");
+        sb.append(";");
+        return sb.toString();
+    }
+
+    @Override
+    public List<String> buildCreateIndexSql(IndexDefinition idx) {
+        List<String> stmts = new ArrayList<>();
+        StringBuilder sb = new StringBuilder();
+
+        // PostgreSQL không hỗ trợ BITMAP index
+        if (idx.getIndexType() == IndexDefinition.IndexType.BITMAP) {
+            return stmts; // empty — không migrate được
+        }
+
+        // Partial index (WHERE clause)
+        if (idx.isPartialIndex()) {
+            // PostgreSQL hỗ trợ partial index với WHERE
+            sb.append(idx.isUnique() ? "CREATE UNIQUE INDEX " : "CREATE INDEX ");
+            if (idx.getIndexName() != null) {
+                sb.append(quoteIdentifier(idx.getIndexName())).append(" ");
+            }
+            sb.append("ON ").append(quoteIdentifier(idx.getTableName()));
+            appendIndexColumns(sb, idx);
+            sb.append(" WHERE ").append(idx.getWhereClause());
+            stmts.add(sb.toString());
+            return stmts;
+        }
+
+        // Expression index
+        if (idx.isExpressionIndex()) {
+            sb.append(idx.isUnique() ? "CREATE UNIQUE INDEX " : "CREATE INDEX ");
+            if (idx.getIndexName() != null) {
+                sb.append(quoteIdentifier(idx.getIndexName())).append(" ");
+            }
+            sb.append("ON ").append(quoteIdentifier(idx.getTableName()));
+            if (idx.getExpression() != null) {
+                sb.append(" (").append(idx.getExpression()).append(")");
+            }
+            stmts.add(sb.toString());
+            return stmts;
+        }
+
+        // Index thường
+        sb.append(idx.isUnique() ? "CREATE UNIQUE INDEX " : "CREATE INDEX ");
+        if (idx.getIndexName() != null) {
+            sb.append(quoteIdentifier(idx.getIndexName())).append(" ");
+        }
+        sb.append("ON ").append(quoteIdentifier(idx.getTableName()));
+        appendIndexColumns(sb, idx);
+        stmts.add(sb.toString());
+        return stmts;
+    }
+
+    private void appendIndexColumns(StringBuilder sb, IndexDefinition idx) {
+        sb.append(" (");
+        List<String> cols = idx.getColumns();
+        List<String> descs = idx.getDescendings();
+        for (int i = 0; i < cols.size(); i++) {
+            if (i > 0) sb.append(", ");
+            String col = cols.get(i);
+            // Nếu là expression
+            if (col.contains("(") || idx.getExpression() != null && i == 0 && !cols.isEmpty()) {
+                sb.append(col);
+            } else {
+                sb.append(quoteIdentifier(col));
+            }
+            if (descs != null && i < descs.size() && "DESC".equalsIgnoreCase(descs.get(i))) {
+                sb.append(" DESC");
+            }
+        }
+        sb.append(")");
+    }
+
+    // ─── VIEW DDL ────────────────────────────────────────────────
+
+    @Override
+    public List<String> buildCreateTriggerSql(TriggerDefinition trig, OracleToPgsqlTransformer transformer) {
+        List<String> stmts = new ArrayList<>();
+        if (trig == null) return stmts;
+
+        String functionBody;
+        if (transformer != null && trig.getSourceDialect() == DatabaseType.ORACLE) {
+            // Transform Oracle → PostgreSQL
+            functionBody = transformer.transformTriggerBody(trig.getTriggerBody());
+        } else {
+            functionBody = trig.getTriggerBody();
+        }
+
+        String functionName = trig.resolveFunctionName();
+        String tableName = trig.getTableName();
+
+        // 1. Tạo FUNCTION
+        StringBuilder func = new StringBuilder();
+        func.append("CREATE OR REPLACE FUNCTION ");
+        func.append(quoteIdentifier(functionName));
+        func.append("() RETURNS trigger AS $$\n");
+        func.append("BEGIN\n");
+        // Thêm RETURN NEW/OLD nếu body không có
+        if (functionBody != null && !functionBody.trim().isEmpty()) {
+            // Kiểm tra xem body đã có RETURN NEW/RETURN OLD chưa
+            String upperBody = functionBody.toUpperCase();
+            if (!upperBody.contains("RETURN NEW") && !upperBody.contains("RETURN OLD")) {
+                // Nếu trigger level = ROW, thêm RETURN NEW
+                func.append("  ");
+                func.append(functionBody.trim());
+                if (!functionBody.trim().endsWith(";")) {
+                    func.append(";");
+                }
+                func.append("\n");
+                func.append("  RETURN NEW;\n");
+            } else {
+                func.append("  ");
+                func.append(functionBody.trim());
+                if (!functionBody.trim().endsWith(";")) {
+                    func.append(";");
+                }
+                func.append("\n");
+            }
+        } else {
+            func.append("  RETURN NEW;\n");
+        }
+        func.append("END;\n");
+        func.append("$$ LANGUAGE plpgsql;");
+        stmts.add(func.toString());
+
+        // 2. Tạo TRIGGER gắn function vào bảng
+        StringBuilder trigStmt = new StringBuilder();
+        trigStmt.append("CREATE TRIGGER ");
+        trigStmt.append(quoteIdentifier(trig.getTriggerName()));
+
+        // Timing + Event
+        String timingEvent = buildTriggerTimingEvent(trig);
+        trigStmt.append(" ").append(timingEvent);
+        trigStmt.append(" ON ").append(quoteIdentifier(tableName));
+
+        // FOR EACH ROW
+        if (trig.isRowLevel()) {
+            trigStmt.append(" FOR EACH ROW");
+        }
+
+        // WHEN clause
+        String whenClause = trig.getTransformedWhenClause();
+        if (whenClause != null && !whenClause.isBlank()) {
+            trigStmt.append(" WHEN (").append(whenClause).append(")");
+        }
+
+        // EXECUTE FUNCTION
+        trigStmt.append(" EXECUTE FUNCTION ").append(quoteIdentifier(functionName)).append("();");
+
+        stmts.add(trigStmt.toString());
+        return stmts;
+    }
+
+    // ─── FUNCTION / PROCEDURE DDL ──────────────────────────────
+
+    @Override
+    public List<String> buildCreateFunctionSql(FunctionDefinition fn, OracleToPgsqlTransformer transformer) {
+        List<String> stmts = new ArrayList<>();
+        if (fn == null) return stmts;
+
+        String functionBody;
+        if (transformer != null && fn.getSourceDialect() == DatabaseType.ORACLE) {
+            functionBody = transformer.transform(fn.getFunctionBody());
+        } else {
+            functionBody = fn.getFunctionBody();
+        }
+
+        StringBuilder sb = new StringBuilder();
+
+        if (fn.isProcedure()) {
+            sb.append("CREATE OR REPLACE PROCEDURE ");
+        } else {
+            sb.append("CREATE OR REPLACE FUNCTION ");
+        }
+
+        sb.append(quoteIdentifier(fn.getFunctionName()));
+        sb.append("(");
+
+        // Arguments
+        List<FunctionDefinition.FunctionArgument> args = fn.getArguments();
+        for (int i = 0; i < args.size(); i++) {
+            if (i > 0) sb.append(", ");
+            FunctionDefinition.FunctionArgument arg = args.get(i);
+            if (arg.getName() != null && !arg.getName().isBlank()) {
+                sb.append(arg.getName()).append(" ");
+            }
+            sb.append(arg.getDataType());
+        }
+        sb.append(")");
+
+        if (fn.isFunction() && fn.getReturnType() != null) {
+            sb.append(" RETURNS ").append(fn.getReturnType());
+        }
+
+        sb.append(" AS $$\n");
+        sb.append(functionBody != null ? functionBody : "BEGIN NULL;\n");
+        sb.append("\n$$ LANGUAGE plpgsql;");
+
+        stmts.add(sb.toString());
+        return stmts;
+    }
+
+    /**
+     * Build phần timing + event cho CREATE TRIGGER.
+     * Ví dụ: "BEFORE INSERT OR UPDATE ON"
+     */
+    private String buildTriggerTimingEvent(TriggerDefinition trig) {
+        StringBuilder sb = new StringBuilder();
+
+        // Timing
+        if (trig.getTiming() == TriggerDefinition.TriggerTiming.INSTEAD_OF) {
+            sb.append("INSTEAD OF");
+        } else if (trig.getTiming() == TriggerDefinition.TriggerTiming.BEFORE) {
+            sb.append("BEFORE");
+        } else {
+            sb.append("AFTER");
+        }
+
+        // Events
+        String events = trig.getTriggeringEvent();
+        if (events != null && !events.isBlank()) {
+            sb.append(" ").append(events.toUpperCase());
+        } else {
+            sb.append(" INSERT"); // default
+        }
+
+        return sb.toString();
+    }
+
     @Override
     public String buildCreateViewSql(ViewDefinition viewDef) {
         // Postgres: pg_get_viewdef trả về SELECT clause thuần (không có CREATE VIEW)

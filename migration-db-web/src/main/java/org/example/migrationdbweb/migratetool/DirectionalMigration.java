@@ -22,6 +22,13 @@ public abstract class DirectionalMigration {
     protected static final boolean MIGRATION_SKIP_EXISTING_FKS = true;
     protected static final boolean MIGRATION_RECREATE_EXISTING_TABLES = false;
 
+    // Feature flags — có thể override bằng env
+    protected static boolean MIGRATION_MIGRATE_SEQUENCES = false;
+    protected static boolean MIGRATION_MIGRATE_INDEXES = false;
+    protected static boolean MIGRATION_MIGRATE_FUNCTIONS = false;
+    protected static boolean MIGRATION_MIGRATE_TRIGGERS = false;
+    protected static boolean MIGRATION_MIGRATE_VIEWS = false;
+
     private final Boolean metadataTestOverride;
 
     protected DirectionalMigration(Boolean metadataTestOverride) {
@@ -44,15 +51,23 @@ public abstract class DirectionalMigration {
 
             System.out.println("Bat dau tien trinh migration...");
 
-            List<TableDefinition> allTables;
+            List<TableDefinition> allTables = new ArrayList<>();
+            List<SequenceDefinition> allSequences = new ArrayList<>();
+            List<IndexDefinition> allIndexes = new ArrayList<>();
+            List<FunctionDefinition> allFunctions = new ArrayList<>();
+            List<TriggerDefinition> allTriggers = new ArrayList<>();
+            List<ViewDefinition> allViews = new ArrayList<>();
+            String sourceSchema = null;
+            String targetSchema = null;
+
             try (Connection sourceConn = manager.getConnection("SOURCE_DB");
                  Connection targetConn = manager.getConnection("TARGET_DB")) {
                 System.out.println("Source URL: " + sourceConn.getMetaData().getURL());
                 System.out.println("Target URL: " + targetConn.getMetaData().getURL());
 
                 MetadataExtractor metadataExtractor = new MetadataExtractor();
-                String sourceSchema = defaultSourceSchema();
-                String targetSchema = defaultTargetSchema();
+                sourceSchema = defaultSourceSchema();
+                targetSchema = defaultTargetSchema();
                 int metadataMaxTables = getEnvAsInt("METADATA_MAX_TABLES", 5);
                 boolean metadataTestEnabled = getEnvAsBoolean("ENABLE_METADATA_TEST", false);
                 if (metadataTestOverride != null) {
@@ -101,6 +116,90 @@ public abstract class DirectionalMigration {
                     includeTables,
                     excludeTables
                 );
+
+                // ── Extract Sequences ───────────────────────────────────────
+                if (MIGRATION_MIGRATE_SEQUENCES) {
+                    System.out.println("Dang trích xuất SEQUENCES...");
+                    List<String> seqNames = metadataExtractor.getSequenceNames(sourceConn, sourceSchema);
+                    for (String s : seqNames) {
+                        SequenceDefinition seq = metadataExtractor.extractSequenceDefinition(
+                                sourceConn, sourceSchema, s, sourceConfig.getType());
+                        if (seq != null && !seq.isSystemSequence()) {
+                            seq.setSourceSchema(sourceSchema);
+                            seq.setTargetSchema(targetSchema);
+                            allSequences.add(seq);
+                        }
+                    }
+                    System.out.println("Tim thay " + allSequences.size() + " sequences.");
+                }
+
+                // ── Extract Indexes ────────────────────────────────────────
+                if (MIGRATION_MIGRATE_INDEXES) {
+                    System.out.println("Dang trích xuất INDEXES...");
+                    Set<String> tableNamesSet = new LinkedHashSet<>();
+                    for (TableDefinition t : allTables) tableNamesSet.add(t.getTableName());
+                    for (String tn : tableNamesSet) {
+                        List<String> idxNames = metadataExtractor.getIndexNames(sourceConn, sourceSchema, tn);
+                        for (String in : idxNames) {
+                            IndexDefinition idx = metadataExtractor.extractIndexDefinition(
+                                    sourceConn, sourceSchema, in, sourceConfig.getType());
+                            if (idx != null && !idx.isSystemIndex() && idx.isMigratable()) {
+                                idx.setSourceSchema(sourceSchema);
+                                idx.setTargetSchema(targetSchema);
+                                allIndexes.add(idx);
+                            }
+                        }
+                    }
+                    System.out.println("Tim thay " + allIndexes.size() + " indexes.");
+                }
+
+                // ── Extract Functions/Procedures ───────────────────────────
+                if (MIGRATION_MIGRATE_FUNCTIONS) {
+                    System.out.println("Dang trích xuất FUNCTIONS/PROCEDURES...");
+                    List<String> fnNames = metadataExtractor.getFunctionNames(sourceConn, sourceSchema);
+                    for (String fn : fnNames) {
+                        FunctionDefinition fd = metadataExtractor.extractFunctionDefinition(
+                                sourceConn, sourceSchema, fn, sourceConfig.getType());
+                        if (fd != null) {
+                            fd.setSourceSchema(sourceSchema);
+                            fd.setTargetSchema(targetSchema);
+                            allFunctions.add(fd);
+                        }
+                    }
+                    System.out.println("Tim thay " + allFunctions.size() + " functions/procedures.");
+                }
+
+                // ── Extract Triggers ────────────────────────────────────
+                if (MIGRATION_MIGRATE_TRIGGERS) {
+                    System.out.println("Dang trích xuất TRIGGERS...");
+                    final List<TableDefinition> tableSnapshot = allTables;
+                    for (String tn : new LinkedHashSet<String>() {{ for (TableDefinition t : tableSnapshot) add(t.getTableName()); }}) {
+                        List<String> trigNames = metadataExtractor.getTriggerNamesForTable(sourceConn, sourceSchema, tn);
+                        for (String tr : trigNames) {
+                            TriggerDefinition td = metadataExtractor.extractTriggerDefinition(
+                                    sourceConn, sourceSchema, tr, sourceConfig.getType());
+                            if (td != null) {
+                                td.setSourceSchema(sourceSchema);
+                                td.setTargetSchema(targetSchema);
+                                allTriggers.add(td);
+                            }
+                        }
+                    }
+                    System.out.println("Tim thay " + allTriggers.size() + " triggers.");
+                }
+
+                // ── Extract Views ────────────────────────────────────────
+                if (MIGRATION_MIGRATE_VIEWS) {
+                    System.out.println("Dang trích xuất VIEWS...");
+                    try {
+                        allViews = metadataExtractor.extractViewDefinitionsWithDependencySort(
+                                sourceConn, sourceSchema, sourceConfig.getType());
+                        System.out.println("Tim thay " + allViews.size() + " views (da sort theo dependency).");
+                    } catch (IllegalStateException e) {
+                        System.err.println("WARN: Circular view dependency: " + e.getMessage() + ". Bo qua views.");
+                        allViews = new ArrayList<>();
+                    }
+                }
             }
 
             if (allTables.isEmpty()) {
@@ -115,7 +214,17 @@ public abstract class DirectionalMigration {
                 System.out.println("MIGRATION_DRY_RUN=true => chi in SQL, khong ghi du lieu.");
                 executeMigration(allTables, targetDialect);
             } else {
-                executeMigration(allTables, sourceDialect, targetDialect);
+                executeMigration(
+                        allTables,
+                        allSequences,
+                        allIndexes,
+                        allFunctions,
+                        allTriggers,
+                        allViews,
+                        sourceDialect,
+                        targetDialect,
+                        targetSchema
+                );
             }
 
         } catch (SQLException | RuntimeException e) {
@@ -434,6 +543,182 @@ public abstract class DirectionalMigration {
         }
 
         return values;
+    }
+
+    /**
+     * Full migration: tables + sequences + indexes + functions + triggers + views.
+     * Chạy trên target DB connection.
+     */
+    private static void executeMigration(
+            List<TableDefinition> allTables,
+            List<SequenceDefinition> allSequences,
+            List<IndexDefinition> allIndexes,
+            List<FunctionDefinition> allFunctions,
+            List<TriggerDefinition> allTriggers,
+            List<ViewDefinition> allViews,
+            SqlDialect sourceDialect,
+            SqlDialect targetDialect,
+            String targetSchema
+    ) {
+        ConnectionManager manager = ConnectionManager.getInstance();
+        MigrationRetryPolicy retryPolicy = MigrationRetryPolicy.fromEnvironment();
+        MigrationCheckpointStore checkpointStore = retryPolicy.isResumeEnabled()
+                ? new MigrationCheckpointStore(retryPolicy.getResumeStateFile())
+                : null;
+
+        try (Connection targetConn = manager.getConnection("TARGET_DB")) {
+
+            int batchSize = Math.max(1, getEnvAsInt("MIGRATION_BATCH_SIZE", 1000));
+            boolean skipExistingTables = getEnvAsBoolean("MIGRATION_SKIP_EXISTING_TABLES", MIGRATION_SKIP_EXISTING_TABLES);
+            boolean skipExistingForeignKeys = getEnvAsBoolean("MIGRATION_SKIP_EXISTING_FKS", MIGRATION_SKIP_EXISTING_FKS);
+            boolean recreateExistingTables = getEnvAsBoolean(
+                    "MIGRATION_RECREATE_EXISTING_TABLES",
+                    MIGRATION_RECREATE_EXISTING_TABLES
+            );
+
+            OracleToPgsqlTransformer transformer = new OracleToPgsqlTransformer();
+
+            printRetryResumeConfig(retryPolicy, checkpointStore);
+
+            if (recreateExistingTables) {
+                dropTargetTablesPhase(targetConn, allTables, targetDialect);
+                if (checkpointStore != null) {
+                    checkpointStore.clear();
+                    System.out.println("Resume state da duoc reset do MIGRATION_RECREATE_EXISTING_TABLES=true.");
+                }
+            } else if (retryPolicy.isResetResumeState() && checkpointStore != null) {
+                checkpointStore.clear();
+                System.out.println("Resume state da duoc reset do MIGRATION_RESET_RESUME_STATE=true.");
+            }
+
+            // ── PHASE 1: Create Tables ───────────────────────────────
+            runCreateTablesPhase(targetConn, allTables, targetDialect, skipExistingTables);
+
+            // ── PHASE 2: Migrate Data ───────────────────────────────
+            SqlGenerator sqlGenerator = new SqlGenerator(sourceDialect, targetDialect);
+            DataTransferService transferService = new DataTransferService(sqlGenerator);
+            for (TableDefinition table : allTables) {
+                if (checkpointStore != null && checkpointStore.isTableCompleted(table.getTableName())) {
+                    System.out.println("Bo qua bang da migrate truoc do (resume): " + table.getTableName());
+                    continue;
+                }
+
+                boolean success = transferTableWithRetry(
+                        manager,
+                        transferService,
+                        table,
+                        batchSize,
+                        retryPolicy,
+                        checkpointStore
+                );
+
+                if (!success) {
+                    System.err.println("Bo qua bang " + table.getTableName() + " sau khi da retry het so lan cho phep.");
+                }
+            }
+
+            // ── PHASE 3: Add Foreign Keys ───────────────────────────
+            runAddForeignKeysPhase(targetConn, allTables, targetDialect, skipExistingForeignKeys);
+
+            // ── PHASE 4: Create Sequences ────────────────────────────
+            if (!allSequences.isEmpty()) {
+                System.out.println("\n--- PHASE 4: CREATING SEQUENCES ---");
+                try (Statement st = targetConn.createStatement()) {
+                    for (SequenceDefinition seq : allSequences) {
+                        String seqSql = normalizeSqlForJdbc(targetDialect.buildCreateSequenceSql(seq));
+                        try {
+                            st.execute(seqSql);
+                            System.out.println("Created sequence: " + seq.getSequenceName());
+                        } catch (SQLException e) {
+                            if (isTableAlreadyExistsError(e)) {
+                                System.out.println("Skipped existing sequence: " + seq.getSequenceName());
+                            } else {
+                                System.err.println("Loi tao sequence " + seq.getSequenceName() + ": " + e.getMessage());
+                            }
+                        }
+                    }
+                }
+            }
+
+            // ── PHASE 5: Create Indexes ──────────────────────────────
+            if (!allIndexes.isEmpty()) {
+                System.out.println("\n--- PHASE 5: CREATING INDEXES ---");
+                try (Statement st = targetConn.createStatement()) {
+                    for (IndexDefinition idx : allIndexes) {
+                        List<String> idxSqls = targetDialect.buildCreateIndexSql(idx);
+                        for (String idxSql : idxSqls) {
+                            if (idxSql == null || idxSql.isBlank()) continue;
+                            try {
+                                st.execute(normalizeSqlForJdbc(idxSql));
+                                System.out.println("Created index: " + idx.getIndexName());
+                            } catch (SQLException e) {
+                                System.err.println("Loi tao index " + idx.getIndexName() + ": " + e.getMessage());
+                            }
+                        }
+                    }
+                }
+            }
+
+            // ── PHASE 6: Create Functions/Procedures ─────────────────
+            if (!allFunctions.isEmpty()) {
+                System.out.println("\n--- PHASE 6: CREATING FUNCTIONS/PROCEDURES ---");
+                try (Statement st = targetConn.createStatement()) {
+                    for (FunctionDefinition fn : allFunctions) {
+                        List<String> fnSqls = targetDialect.buildCreateFunctionSql(fn, transformer);
+                        for (String fnSql : fnSqls) {
+                            if (fnSql == null || fnSql.isBlank()) continue;
+                            try {
+                                st.execute(normalizeSqlForJdbc(fnSql));
+                                System.out.println("Created function: " + fn.getFunctionName());
+                            } catch (SQLException e) {
+                                System.err.println("Loi tao function " + fn.getFunctionName() + ": " + e.getMessage());
+                            }
+                        }
+                    }
+                }
+            }
+
+            // ── PHASE 7: Create Triggers ────────────────────────────
+            if (!allTriggers.isEmpty()) {
+                System.out.println("\n--- PHASE 7: CREATING TRIGGERS ---");
+                try (Statement st = targetConn.createStatement()) {
+                    for (TriggerDefinition trig : allTriggers) {
+                        List<String> trigSqls = targetDialect.buildCreateTriggerSql(trig, transformer);
+                        for (String trigSql : trigSqls) {
+                            if (trigSql == null || trigSql.isBlank()) continue;
+                            try {
+                                st.execute(normalizeSqlForJdbc(trigSql));
+                                System.out.println("Created trigger: " + trig.getTriggerName());
+                            } catch (SQLException e) {
+                                System.err.println("Loi tao trigger " + trig.getTriggerName() + ": " + e.getMessage());
+                            }
+                        }
+                    }
+                }
+            }
+
+            // ── PHASE 8: Create Views ────────────────────────────────
+            if (!allViews.isEmpty()) {
+                System.out.println("\n--- PHASE 8: CREATING VIEWS ---");
+                try (Statement st = targetConn.createStatement()) {
+                    for (ViewDefinition vd : allViews) {
+                        String viewSql = targetDialect.buildCreateViewSql(vd);
+                        if (viewSql == null || viewSql.isBlank()) continue;
+                        try {
+                            st.execute(normalizeSqlForJdbc(viewSql));
+                            System.out.println("Created view: " + vd.getViewName());
+                        } catch (SQLException e) {
+                            System.err.println("Loi tao view " + vd.getViewName() + ": " + e.getMessage());
+                        }
+                    }
+                }
+            }
+
+            System.out.println("\n--- MIGRATION COMPLETE ---");
+
+        } catch (Exception e) {
+            System.err.println("Migration that bai: " + e.getMessage());
+        }
     }
 
     private static void executeMigration(List<TableDefinition> allTables, SqlDialect targetDialect) {

@@ -10,6 +10,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.regex.Pattern;
 
 import org.example.migrationdbweb.dto.MigrationRequest;
 import org.example.migrationdbweb.dto.MigrationStatus;
@@ -18,10 +19,18 @@ import org.example.migrationdbweb.migratetool.DataTransferService;
 import org.example.migrationdbweb.migratetool.DatabaseConfig;
 import org.example.migrationdbweb.migratetool.DatabaseType;
 import org.example.migrationdbweb.migratetool.DialectFactory;
+import org.example.migrationdbweb.migratetool.FunctionDefinition;
+import org.example.migrationdbweb.migratetool.IndexDefinition;
 import org.example.migrationdbweb.migratetool.MetadataExtractor;
+import org.example.migrationdbweb.migratetool.MigrationCheckpointStore;
+import org.example.migrationdbweb.migratetool.MigrationRetryPolicy;
+import org.example.migrationdbweb.migratetool.OracleToPgsqlTransformer;
+import org.example.migrationdbweb.migratetool.PostgresDialect;
+import org.example.migrationdbweb.migratetool.SequenceDefinition;
 import org.example.migrationdbweb.migratetool.SqlDialect;
 import org.example.migrationdbweb.migratetool.SqlGenerator;
 import org.example.migrationdbweb.migratetool.TableDefinition;
+import org.example.migrationdbweb.migratetool.TriggerDefinition;
 import org.example.migrationdbweb.migratetool.ViewDefinition;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.messaging.simp.SimpMessagingTemplate;
@@ -125,38 +134,78 @@ public class MigrationWebWorkerService {
 
                     broadcastStatus(60, "RUNNING", "Dang chuyen du lieu bang...", true);
                     SqlGenerator sqlGenerator = new SqlGenerator(sourceDialect, targetDialect);
-                    DataTransferService transferService = new DataTransferService(sqlGenerator);
 
+                    // ── Retry / Resume setup ──────────────────────────────────────────
+                    MigrationRetryPolicy retryPolicy = buildRetryPolicy(request.getRetry());
+                    MigrationCheckpointStore checkpointStore = null;
+
+                    if (request.getResume().isEnabled()) {
+                        checkpointStore = new MigrationCheckpointStore(request.getResume().getStateFile());
+                        if (request.getResume().isReset()) {
+                            checkpointStore.clear();
+                            broadcastStatus(60, "RUNNING",
+                                    "[RESUME] Reset checkpoint file: " + checkpointStore.getStateFilePath(), true);
+                        }
+                        broadcastStatus(60, "RUNNING",
+                                "[RESUME] enabled, stateFile=" + checkpointStore.getStateFilePath(), true);
+                    }
+
+                    if (retryPolicy.isRetryEnabled()) {
+                        broadcastStatus(60, "RUNNING",
+                                "[RETRY] enabled, maxAttempts=" + retryPolicy.getMaxAttempts()
+                                + ", delayMs=" + retryPolicy.getInitialDelayMs()
+                                + ", backoff=" + retryPolicy.getBackoffMultiplier(), true);
+                    }
+
+                    // ── Migrate each table with retry / resume ────────────────────────
                     for (int i = 0; i < tableDefinitions.size(); i++) {
                         final int tableIndex = i;
                         TableDefinition table = tableDefinitions.get(i);
-                        broadcastStatus(60 + (int) ((i * 25.0f) / tableDefinitions.size()), "RUNNING",
-                                "Dang migrate du lieu bang " + table.getTableName() + "...", true);
 
-                        DataTransferService.TransferResult result = transferService.transferTableData(
-                                sourceConn,
-                                targetConn,
-                                table,
-                                1000,
-                                limitRows,
+                        // Skip bảng đã hoàn thành (resume)
+                        if (checkpointStore != null && checkpointStore.isTableCompleted(table.getTableName())) {
+                            broadcastStatus(
+                                    60 + (int) (((i + 1) * 25.0f) / tableDefinitions.size()),
+                                    "RUNNING",
+                                    "Bo qua bang da migrate (resume): " + table.getTableName(),
+                                    true
+                            );
+                            continue;
+                        }
+
+                        broadcastStatus(
+                                60 + (int) ((i * 25.0f) / tableDefinitions.size()),
+                                "RUNNING",
+                                "Dang migrate du lieu bang " + table.getTableName() + "...",
+                                true
+                        );
+
+                        DataTransferService.TransferResult result = transferTableWithRetry(
+                                sourceConn, targetConn,
+                                sqlGenerator, retryPolicy,
+                                table, 1000, limitRows,
                                 options.isCopyNewOnly(),
+                                checkpointStore,
+                                tableDefinitions.size(), i,
                                 (tableName, justTransferred, totalTransferred, totalSkipped) -> broadcastStatus(
-                                    Math.min(85, 60 + (int) (((tableIndex + 1) * 25.0f) / tableDefinitions.size())),
+                                        Math.min(84, 60 + (int) (((tableIndex + 1) * 25.0f) / tableDefinitions.size())),
                                         "RUNNING",
                                         "Bang " + tableName + ": copied=" + totalTransferred + ", skipped=" + totalSkipped,
                                         true
                                 )
                         );
 
-                        broadcastStatus(
-                                60 + (int) (((i + 1) * 25.0f) / tableDefinitions.size()),
-                                "RUNNING",
-                                "Hoan tat bang " + table.getTableName()
-                                        + " | copied=" + result.getTransferredRows()
-                                        + " | skipped=" + result.getSkippedRows()
-                                        + (result.isLimitReached() ? " | dat nguong limit" : ""),
-                                true
-                        );
+                        if (result != null) {
+                            broadcastStatus(
+                                    60 + (int) (((i + 1) * 25.0f) / tableDefinitions.size()),
+                                    "RUNNING",
+                                    "Hoan tat bang " + table.getTableName()
+                                            + " | copied=" + result.getTransferredRows()
+                                            + " | skipped=" + result.getSkippedRows()
+                                            + (result.isLimitReached() ? " | dat nguong limit" : ""),
+                                    true
+                            );
+                        }
                     }
                 } else {
                     broadcastStatus(85, "RUNNING", "Bo qua migrate du lieu (STRUCTURE_ONLY).", true);
@@ -166,19 +215,42 @@ public class MigrationWebWorkerService {
                     broadcastStatus(88, "RUNNING", "Dang tao foreign keys...", true);
                     runAddForeignKeysPhase(targetConn, tableDefinitions, targetDialect);
                     broadcastStatus(90, "RUNNING", "Hoan tat tao foreign keys.", true);
+
+                    // ─── PHASE 5: SEQUENCES ──────────────────────────────────────
+                    if (options.isMigrateSequences()) {
+                        runCreateSequencesPhaseWeb(targetConn, sourceConn, sourceSchema, targetSchema,
+                                request.getSource().getType(), targetDialect);
+                    }
+
+                    // ─── PHASE 6: INDEXES ──────────────────────────────────────
+                    if (options.isMigrateIndexes()) {
+                        runCreateIndexesPhaseWeb(targetConn, sourceConn, sourceSchema, targetSchema,
+                                tableDefinitions, request.getSource().getType(), targetDialect);
+                    }
+
+                    // ─── PHASE 7: FUNCTIONS / PROCEDURES ───────────────────────
+                    if (options.isMigrateFunctions()) {
+                        runCreateFunctionsPhaseWeb(targetConn, sourceConn, sourceSchema, targetSchema,
+                                request.getSource().getType(), targetDialect);
+                    }
+
+                    // ─── PHASE 8: TRIGGERS ────────────────────────────────────
+                    if (options.isMigrateTriggers()) {
+                        runCreateTriggersPhaseWeb(targetConn, sourceConn, sourceSchema, targetSchema,
+                                tableDefinitions, request.getSource().getType(), targetDialect);
+                    }
                 } else {
-                    broadcastStatus(90, "RUNNING", "Bo qua tao foreign keys (DATA_ONLY).", true);
+                    broadcastStatus(90, "RUNNING", "Bo qua cac buoc cau truc (DATA_ONLY).", true);
                 }
 
-                // ─── PHASE: CREATE VIEWS ─────────────────────────────────────────
-                // NOTE: View phu thuoc table nen phai tao SAU cac bang va FK.
-                // Neu target la Oracle, bo qua view vi Oracle->Oracle thi view
-                // da nam trong table definition.
+                // ─── PHASE 9: CREATE VIEWS ─────────────────────────────────────────
+                // View phu thuoc table nen phai tao SAU cac bang va FK.
                 if (options.isMigrateViews() && !dataOnly) {
                     runCreateViewsPhase(
                             sourceConn, targetConn,
                             sourceSchema, targetSchema,
                             request.getSource().getType(),
+                            request.getTarget().getType(),
                             targetDialect,
                             options
                     );
@@ -398,6 +470,7 @@ public class MigrationWebWorkerService {
             String sourceSchema,
             String targetSchema,
             DatabaseType sourceDbType,
+            DatabaseType targetDbType,
             SqlDialect targetDialect,
             MigrationRequest.MigrationOptions options
     ) throws SQLException {
@@ -459,7 +532,8 @@ public class MigrationWebWorkerService {
 
             try {
                 boolean created = createSingleView(targetConn, targetDialect, vd,
-                        sourceSchema, targetSchema, options.isReplaceExistingViews());
+                        sourceSchema, targetSchema, sourceDbType, targetDbType,
+                        options.isReplaceExistingViews());
 
                 if (created) {
                     successCount++;
@@ -495,24 +569,23 @@ public class MigrationWebWorkerService {
             ViewDefinition vd,
             String sourceSchema,
             String targetSchema,
+            DatabaseType sourceDbType,
+            DatabaseType targetDbType,
             boolean replaceExisting
     ) throws SQLException {
-        // 1. Replace schema trong selectClause nếu source != target
-        if (!sourceSchema.equalsIgnoreCase(targetSchema)) {
-            String replaced = replaceSchemaInClause(vd.getSelectClause(), sourceSchema, targetSchema);
-            vd = ViewDefinition.builder()
-                    .viewName(vd.getViewName())
-                    .schema(vd.getSchema())
-                    .sourceDialect(vd.getSourceDialect())
-                    .selectClause(replaced)
-                    .checkOption(vd.getCheckOption())
-                    .sourceSchema(sourceSchema)
-                    .targetSchema(targetSchema)
-                    .build();
-        } else {
-            vd.setSourceSchema(sourceSchema);
-            vd.setTargetSchema(targetSchema);
-        }
+        // 1. Transform view body: schema replacement + Oracle→PG regex
+        String transformedBody = transformViewBody(
+                vd.getSelectClause(), sourceSchema, targetSchema, sourceDbType, targetDbType
+        );
+        vd = ViewDefinition.builder()
+                .viewName(vd.getViewName())
+                .schema(vd.getSchema())
+                .sourceDialect(vd.getSourceDialect())
+                .selectClause(transformedBody)
+                .checkOption(vd.getCheckOption())
+                .sourceSchema(sourceSchema)
+                .targetSchema(targetSchema)
+                .build();
 
         // 2. Build SQL
         String createSql = targetDialect.buildCreateViewSql(vd);
@@ -546,18 +619,60 @@ public class MigrationWebWorkerService {
     }
 
     /**
-     * Replace source schema prefix trong SELECT clause.
-     * Ví dụ: "SELECT * FROM SCOTT.DEPT" → "SELECT * FROM PUBLIC.DEPT"
+     * Replace source schema prefix trong SELECT clause bằng regex an toàn.
+     *
+     * Quy tắc:
+     * - Chỉ thay thế khi schema đứng trước dấu `.` ở vị trí hợp lệ (không phải trong string literals)
+     * - Khớp cả identifier không có quotes và có quotes: SCOTT.DEPT, "SCOTT"."DEPT", SCOTT.DEPT
+     * - Không thay thế trong nội dung string literals (ví dụ: 'SCOTT.TABLE_NAME')
+     * - Không thay thế nếu schema đích đã đúng (tránh double-replace)
+     *
+     * Ví dụ:
+     *   "SELECT * FROM SCOTT.DEPT"            → "SELECT * FROM PUBLIC.DEPT"
+     *   "SELECT * FROM \"SCOTT\".\"DEPT\""      → "SELECT * FROM \"PUBLIC\".\"DEPT\""
+     *   "SELECT 'scott.data'"                  → (không đổi — trong string literal)
+     *   "WHERE COL = 'SCOTT.XYZ'"              → (không đổi — trong string literal)
      */
-    private String replaceSchemaInClause(String clause, String sourceSchema, String targetSchema) {
-        if (clause == null || sourceSchema == null || targetSchema == null) {
-            return clause;
+    private String transformViewBody(String clause, String sourceSchema, String targetSchema,
+            DatabaseType sourceDbType, DatabaseType targetDbType) {
+        if (clause == null) return clause;
+
+        String result = clause;
+
+        // 1. Schema replacement — dùng regex an toàn (tránh thay trong string literals)
+        if (sourceSchema != null && targetSchema != null
+                && !sourceSchema.equalsIgnoreCase(targetSchema)) {
+
+            // a) Unquoted identifier: SCOTT.DEPT → PUBLIC.DEPT
+            //    Dùng negative lookbehind để đảm bảo không match trong string literals
+            //    (?<![a-zA-Z0-9_"']) = không có alphanumeric/quote/underscore đứng trước
+            result = result.replaceAll(
+                    "(?<![a-zA-Z0-9_\\'\"])"                                    // không có identifier/quote trước
+                            + Pattern.quote(sourceSchema) + "\\.([a-zA-Z_][a-zA-Z0-9_]*)",  // schema. identifier
+                    targetSchema + ".$1"
+            );
+
+            // b) Quoted identifier: "SCOTT"."DEPT" hoặc "SCOTT".DEPT → "PUBLIC"."DEPT"
+            //    Escape tên schema trong dấu ngoặc kép
+            result = result.replaceAll(
+                    "\"\\s*" + Pattern.quote(sourceSchema) + "\\s*\"\\s*\\.",
+                    "\"" + targetSchema + "\"."
+            );
         }
-        // Case-insensitive replace "SOURCE_SCHEMA." thành "TARGET_SCHEMA."
-        return clause.replaceAll(
-                "(?i)" + sourceSchema + "\\.",
-                targetSchema + "."
-        );
+
+        // 2. Oracle → PostgreSQL transformation
+        if (sourceDbType == DatabaseType.ORACLE && targetDbType == DatabaseType.POSTGRESQL) {
+            OracleToPgsqlTransformer transformer = new OracleToPgsqlTransformer();
+            result = transformer.transform(result);
+
+            // Detect unsupported features và broadcast warning
+            List<String> warnings = OracleToPgsqlTransformer.detectUnsupportedFeatures(result);
+            for (String warning : warnings) {
+                System.err.println("  [VIEW-TRANSFORM-WARN] " + warning);
+            }
+        }
+
+        return result;
     }
 
     private List<ViewDefinition> applyViewFilters(
@@ -586,5 +701,454 @@ public class MigrationWebWorkerService {
                 || message.contains("already exists")
                 && message.contains("view")
                 || message.contains("ora-00955");    // Oracle name is already used by an existing object
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // RETRY / RESUME IMPLEMENTATION
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /**
+     * Build MigrationRetryPolicy từ RetryOptions trong request.
+     */
+    private MigrationRetryPolicy buildRetryPolicy(MigrationRequest.RetryOptions retryOptions) {
+        if (retryOptions == null) {
+            return new MigrationRetryPolicy(
+                    false, 3, 2000, 2.0, false, null, false
+            );
+        }
+        return new MigrationRetryPolicy(
+                retryOptions.isEnabled(),
+                retryOptions.getMaxAttempts(),
+                retryOptions.getInitialDelayMs(),
+                retryOptions.getBackoffMultiplier(),
+                false,  // resumeEnabled — do checkpointStore kiểm soát riêng
+                null,
+                false
+        );
+    }
+
+    /**
+     * Migrate một bảng với retry + resume.
+     * Retry: thử lại toàn bộ bảng khi gặp lỗi tạm thời (mạng, timeout, deadlock).
+     * Resume: đọc offset từ checkpoint, tiếp tục từ điểm đã dừng.
+     *
+     * @return TransferResult nếu thành công, null nếu thất bại sau tất cả retry
+     */
+    private DataTransferService.TransferResult transferTableWithRetry(
+            Connection sourceConn,
+            Connection targetConn,
+            SqlGenerator sqlGenerator,
+            MigrationRetryPolicy retryPolicy,
+            TableDefinition table,
+            int batchSize,
+            Integer limitRows,
+            boolean copyNewOnly,
+            MigrationCheckpointStore checkpointStore,
+            int totalTables,
+            int tableIndex,
+            DataTransferService.TransferProgressListener progressListener
+    ) {
+        int attempts = retryPolicy.resolveAttempts();
+        boolean hasPrimaryKey = !table.getPrimaryKeys().isEmpty();
+        int startOffset = 0;
+
+        // Lấy offset từ checkpoint (resume)
+        if (checkpointStore != null) {
+            startOffset = checkpointStore.getTableOffset(table.getTableName());
+            if (startOffset > 0) {
+                broadcastStatus(
+                        60 + (int) ((tableIndex * 25.0f) / totalTables),
+                        "RUNNING",
+                        "Resume bang " + table.getTableName() + " tu offset " + startOffset + "...",
+                        true
+                );
+            }
+        }
+
+        for (int attempt = 1; attempt <= attempts; attempt++) {
+            // Tạo DataTransferService mới mỗi attempt để đảm bảo connection sạch
+            DataTransferService transferService = new DataTransferService(sqlGenerator, retryPolicy);
+
+            try (Connection srcConn = sourceConn;
+                 Connection tgtConn = targetConn) {
+
+                if (attempt > 1) {
+                    broadcastStatus(
+                            60 + (int) ((tableIndex * 25.0f) / totalTables),
+                            "RUNNING",
+                            "Retry bang " + table.getTableName() + " lan " + attempt + "/" + attempts + "...",
+                            true
+                    );
+                }
+
+                final int currentStartOffset = startOffset;
+                DataTransferService.TransferResult result = transferService.transferTableData(
+                        srcConn,
+                        tgtConn,
+                        table,
+                        batchSize,
+                        limitRows,
+                        copyNewOnly,
+                        currentStartOffset,
+                        (tableName, justTransferred, totalTransferred, totalSkipped) -> {
+                            // Cập nhật checkpoint sau mỗi batch
+                            if (checkpointStore != null) {
+                                checkpointStore.updateTableOffset(tableName, totalTransferred);
+                            }
+                            if (progressListener != null) {
+                                progressListener.onBatchCommitted(tableName, justTransferred, totalTransferred, totalSkipped);
+                            }
+                        }
+                );
+
+                // Thành công → đánh dấu bảng hoàn tất trong checkpoint
+                if (checkpointStore != null) {
+                    checkpointStore.markTableCompleted(table.getTableName(), result.getTransferredRows());
+                }
+
+                return result;
+
+            } catch (SQLException e) {
+                boolean isRetryable = isRetryableException(e);
+                boolean lastAttempt = (attempt == attempts);
+
+                if (!isRetryable || lastAttempt) {
+                    // Không retry được hoặc hết số lần → thất bại
+                    broadcastStatus(
+                            60 + (int) ((tableIndex * 25.0f) / totalTables),
+                            "FAILED",
+                            "[LOI] Bang " + table.getTableName()
+                                    + ": " + e.getMessage()
+                                    + (lastAttempt ? " (het retry)" : " (khong retry duoc)"),
+                            false
+                    );
+                    return null;
+                }
+
+                // Đọc lại offset từ checkpoint sau khi lỗi (đảm bảo offset mới nhất)
+                if (checkpointStore != null) {
+                    startOffset = checkpointStore.getTableOffset(table.getTableName());
+                }
+
+                long delayMs = retryPolicy.delayForAttempt(attempt);
+                broadcastStatus(
+                        60 + (int) ((tableIndex * 25.0f) / totalTables),
+                        "RUNNING",
+                        "[RETRY] Loi tam thoi bang " + table.getTableName()
+                                + " (lan " + attempt + "/" + attempts + ")"
+                                + ", cho " + delayMs + "ms. Ly do: " + e.getMessage(),
+                        true
+                );
+                sleep(delayMs);
+            }
+        }
+
+        return null;
+    }
+
+    private static boolean isRetryableException(SQLException e) {
+        if (e == null) {
+            return false;
+        }
+        String sqlState = e.getSQLState();
+        if (sqlState != null) {
+            if (sqlState.startsWith("08")
+                    || "40001".equals(sqlState)
+                    || "40P01".equals(sqlState)
+                    || "HYT00".equals(sqlState)
+                    || "HYT01".equals(sqlState)) {
+                return true;
+            }
+        }
+        String message = e.getMessage();
+        if (message == null) {
+            return false;
+        }
+        String lowered = message.toLowerCase(Locale.ROOT);
+        return lowered.contains("connection")
+                || lowered.contains("socket")
+                || lowered.contains("timed out")
+                || lowered.contains("timeout")
+                || lowered.contains("broken pipe")
+                || lowered.contains("i/o error")
+                || lowered.contains("communications link failure");
+    }
+
+    private static void sleep(long millis) {
+        if (millis <= 0) {
+            return;
+        }
+        try {
+            Thread.sleep(millis);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // WEB PHASE 5: SEQUENCES
+    // ─────────────────────────────────────────────────────────────────────────
+
+    private void runCreateSequencesPhaseWeb(
+            Connection targetConn,
+            Connection sourceConn,
+            String sourceSchema,
+            String targetSchema,
+            DatabaseType sourceDbType,
+            SqlDialect targetDialect
+    ) throws SQLException {
+        broadcastStatus(90, "RUNNING", "Bat dau migrate sequences...", true);
+        MetadataExtractor extractor = new MetadataExtractor();
+
+        List<String> seqNames = extractor.getSequenceNames(sourceConn, sourceSchema);
+        if (seqNames.isEmpty()) {
+            broadcastStatus(90, "RUNNING", "Khong co sequence nao trong schema nguon.", true);
+            return;
+        }
+
+        int successCount = 0;
+        int skipCount = 0;
+        try (Statement stmt = targetConn.createStatement()) {
+            for (String seqName : seqNames) {
+                SequenceDefinition seq = extractor.extractSequenceDefinition(
+                        sourceConn, sourceSchema, seqName, sourceDbType);
+                if (seq == null || seq.isSystemSequence()) continue;
+
+                seq.setSourceSchema(sourceSchema);
+                seq.setTargetSchema(targetSchema);
+
+                try {
+                    String sql = normalizeSqlForJdbc(targetDialect.buildCreateSequenceSql(seq));
+                    stmt.execute(sql);
+                    successCount++;
+                } catch (SQLException e) {
+                    if (isSequenceAlreadyExistsError(e)) {
+                        skipCount++;
+                    } else {
+                        System.err.println("Loi tao sequence " + seqName + ": " + e.getMessage());
+                    }
+                }
+            }
+        }
+        broadcastStatus(91, "RUNNING",
+                "Hoan tat sequences: " + successCount + " tao, " + skipCount + " skip.", true);
+    }
+
+    private static boolean isSequenceAlreadyExistsError(SQLException e) {
+        String sqlState = e.getSQLState();
+        String message = e.getMessage() == null ? "" : e.getMessage().toLowerCase(Locale.ROOT);
+        return "42P07".equals(sqlState) || message.contains("already exists");
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // WEB PHASE 6: INDEXES
+    // ─────────────────────────────────────────────────────────────────────────
+
+    private void runCreateIndexesPhaseWeb(
+            Connection targetConn,
+            Connection sourceConn,
+            String sourceSchema,
+            String targetSchema,
+            List<TableDefinition> tableDefinitions,
+            DatabaseType sourceDbType,
+            SqlDialect targetDialect
+    ) throws SQLException {
+        broadcastStatus(91, "RUNNING", "Bat dau migrate indexes...", true);
+        MetadataExtractor extractor = new MetadataExtractor();
+
+        int successCount = 0;
+        int skipCount = 0;
+        int errorCount = 0;
+
+        try (Statement stmt = targetConn.createStatement()) {
+            for (TableDefinition table : tableDefinitions) {
+                List<String> idxNames = extractor.getIndexNames(sourceConn, sourceSchema, table.getTableName());
+                for (String idxName : idxNames) {
+                    IndexDefinition idx = extractor.extractIndexDefinition(
+                            sourceConn, sourceSchema, idxName, sourceDbType);
+                    if (idx == null || !idx.isMigratable() || idx.isSystemIndex()) continue;
+
+                    idx.setSourceSchema(sourceSchema);
+                    idx.setTargetSchema(targetSchema);
+
+                    List<String> idxSqls = targetDialect.buildCreateIndexSql(idx);
+                    for (String idxSql : idxSqls) {
+                        if (idxSql == null || idxSql.isBlank()) continue;
+                        try {
+                            stmt.execute(normalizeSqlForJdbc(idxSql));
+                            successCount++;
+                        } catch (SQLException e) {
+                            if (isIndexAlreadyExistsError(e)) {
+                                skipCount++;
+                            } else {
+                                errorCount++;
+                                System.err.println("Loi tao index " + idxName + ": " + e.getMessage());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        broadcastStatus(91, "RUNNING",
+                "Hoan tat indexes: " + successCount + " tao, " + skipCount + " skip, " + errorCount + " loi.", true);
+    }
+
+    private static boolean isIndexAlreadyExistsError(SQLException e) {
+        String sqlState = e.getSQLState();
+        String message = e.getMessage() == null ? "" : e.getMessage().toLowerCase(Locale.ROOT);
+        return "42P07".equals(sqlState) || message.contains("already exists");
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // WEB PHASE 7: FUNCTIONS / PROCEDURES
+    // ─────────────────────────────────────────────────────────────────────────
+
+    private void runCreateFunctionsPhaseWeb(
+            Connection targetConn,
+            Connection sourceConn,
+            String sourceSchema,
+            String targetSchema,
+            DatabaseType sourceDbType,
+            SqlDialect targetDialect
+    ) throws SQLException {
+        broadcastStatus(91, "RUNNING", "Bat dau migrate functions/procedures...", true);
+
+        OracleToPgsqlTransformer transformer = null;
+        if (sourceDbType == DatabaseType.ORACLE && targetDialect instanceof PostgresDialect) {
+            transformer = new OracleToPgsqlTransformer();
+        }
+
+        MetadataExtractor extractor = new MetadataExtractor();
+        List<String> fnNames = extractor.getFunctionNames(sourceConn, sourceSchema);
+        if (fnNames.isEmpty()) {
+            broadcastStatus(91, "RUNNING", "Khong co function/procedure nao trong schema nguon.", true);
+            return;
+        }
+
+        int successCount = 0;
+        int skipCount = 0;
+        int errorCount = 0;
+
+        try (Statement stmt = targetConn.createStatement()) {
+            for (String fnName : fnNames) {
+                FunctionDefinition fn = extractor.extractFunctionDefinition(
+                        sourceConn, sourceSchema, fnName, sourceDbType);
+                if (fn == null) continue;
+
+                fn.setSourceSchema(sourceSchema);
+                fn.setTargetSchema(targetSchema);
+
+                // Detect unsupported features
+                if (fn.getFunctionBody() != null) {
+                    List<String> warnings = OracleToPgsqlTransformer.detectUnsupportedFeatures(fn.getFunctionBody());
+                    for (String w : warnings) {
+                        System.err.println("  [VIEW-TRANSFORM-WARN] " + fnName + ": " + w);
+                    }
+                }
+
+                List<String> fnSqls = targetDialect.buildCreateFunctionSql(fn, transformer);
+                for (String fnSql : fnSqls) {
+                    if (fnSql == null || fnSql.isBlank()) continue;
+                    try {
+                        stmt.execute(normalizeSqlForJdbc(fnSql));
+                        successCount++;
+                    } catch (SQLException e) {
+                        if (isFunctionAlreadyExistsError(e)) {
+                            skipCount++;
+                        } else {
+                            errorCount++;
+                            System.err.println("Loi tao function " + fnName + ": " + e.getMessage());
+                        }
+                    }
+                }
+            }
+        }
+        broadcastStatus(92, "RUNNING",
+                "Hoan tat functions: " + successCount + " tao, " + skipCount + " skip, " + errorCount + " loi.", true);
+    }
+
+    private static boolean isFunctionAlreadyExistsError(SQLException e) {
+        String sqlState = e.getSQLState();
+        String message = e.getMessage() == null ? "" : e.getMessage().toLowerCase(Locale.ROOT);
+        return "42P07".equals(sqlState)
+                || "42723".equals(sqlState)
+                || message.contains("already exists")
+                || message.contains("duplicate function");
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // WEB PHASE 8: TRIGGERS
+    // ─────────────────────────────────────────────────────────────────────────
+
+    private void runCreateTriggersPhaseWeb(
+            Connection targetConn,
+            Connection sourceConn,
+            String sourceSchema,
+            String targetSchema,
+            List<TableDefinition> tableDefinitions,
+            DatabaseType sourceDbType,
+            SqlDialect targetDialect
+    ) throws SQLException {
+        broadcastStatus(92, "RUNNING", "Bat dau migrate triggers...", true);
+
+        OracleToPgsqlTransformer transformer = null;
+        if (sourceDbType == DatabaseType.ORACLE && targetDialect instanceof PostgresDialect) {
+            transformer = new OracleToPgsqlTransformer();
+        }
+
+        MetadataExtractor extractor = new MetadataExtractor();
+        int successCount = 0;
+        int skipCount = 0;
+        int errorCount = 0;
+
+        try (Statement stmt = targetConn.createStatement()) {
+            for (TableDefinition table : tableDefinitions) {
+                List<String> trigNames = extractor.getTriggerNamesForTable(
+                        sourceConn, sourceSchema, table.getTableName());
+                for (String trigName : trigNames) {
+                    TriggerDefinition trig = extractor.extractTriggerDefinition(
+                            sourceConn, sourceSchema, trigName, sourceDbType);
+                    if (trig == null) continue;
+
+                    trig.setSourceSchema(sourceSchema);
+                    trig.setTargetSchema(targetSchema);
+
+                    // Detect unsupported features
+                    if (trig.getTriggerBody() != null) {
+                        List<String> warnings = OracleToPgsqlTransformer.detectUnsupportedFeatures(trig.getTriggerBody());
+                        for (String w : warnings) {
+                            System.err.println("  [VIEW-TRANSFORM-WARN] " + trigName + ": " + w);
+                        }
+                    }
+
+                    List<String> trigSqls = targetDialect.buildCreateTriggerSql(trig, transformer);
+                    for (String trigSql : trigSqls) {
+                        if (trigSql == null || trigSql.isBlank()) continue;
+                        try {
+                            stmt.execute(normalizeSqlForJdbc(trigSql));
+                            successCount++;
+                        } catch (SQLException e) {
+                            if (isTriggerAlreadyExistsError(e)) {
+                                skipCount++;
+                            } else {
+                                errorCount++;
+                                System.err.println("Loi tao trigger " + trigName + ": " + e.getMessage());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        broadcastStatus(92, "RUNNING",
+                "Hoan tat triggers: " + successCount + " tao, " + skipCount + " skip, " + errorCount + " loi.", true);
+    }
+
+    private static boolean isTriggerAlreadyExistsError(SQLException e) {
+        String sqlState = e.getSQLState();
+        String message = e.getMessage() == null ? "" : e.getMessage().toLowerCase(Locale.ROOT);
+        return "42P06".equals(sqlState)
+                || message.contains("already exists")
+                && message.contains("trigger")
+                || message.contains("ora-00955");
     }
 }

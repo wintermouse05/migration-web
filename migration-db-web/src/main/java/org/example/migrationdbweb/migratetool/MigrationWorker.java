@@ -36,6 +36,21 @@ public class MigrationWorker extends SwingWorker<Void, String> {
     private final Set<String> excludeTables;
     private final MigrationRetryPolicy retryPolicy;
 
+    // Sequences và Indexes được extract trước khi migration
+    private List<SequenceDefinition> allSequences = new ArrayList<>();
+    private List<IndexDefinition> allIndexes = new ArrayList<>();
+    private List<FunctionDefinition> allFunctions = new ArrayList<>();
+    private List<TriggerDefinition> allTriggers = new ArrayList<>();
+    private List<ViewDefinition> allViews = new ArrayList<>();
+
+    // Flags điều khiển migration các object nâng cao
+    private final boolean migrateSequences;
+    private final boolean migrateIndexes;
+    private final boolean migrateFunctions;
+    private final boolean migrateTriggers;
+    private final Set<String> includeViews;
+    private final Set<String> excludeViews;
+
     public MigrationWorker(
             MigrationAppUI ui,
             boolean isStructureOnly,
@@ -47,9 +62,15 @@ public class MigrationWorker extends SwingWorker<Void, String> {
             int batchSize,
             boolean truncateTarget,
             boolean copyNewOnly,
-                Integer limitRows,
-                Set<String> includeTables,
-                Set<String> excludeTables
+            Integer limitRows,
+            Set<String> includeTables,
+            Set<String> excludeTables,
+            boolean migrateSequences,
+            boolean migrateIndexes,
+            boolean migrateFunctions,
+            boolean migrateTriggers,
+            Set<String> includeViews,
+            Set<String> excludeViews
     ) {
         this.ui = ui;
         this.isStructureOnly = isStructureOnly;
@@ -65,6 +86,14 @@ public class MigrationWorker extends SwingWorker<Void, String> {
         this.includeTables = normalizeTableFilter(includeTables);
         this.excludeTables = normalizeTableFilter(excludeTables);
         this.retryPolicy = MigrationRetryPolicy.fromEnvironment();
+
+        // Advanced migration flags (migrate X when selected)
+        this.migrateSequences = migrateSequences;
+        this.migrateIndexes   = migrateIndexes;
+        this.migrateFunctions = migrateFunctions;
+        this.migrateTriggers  = migrateTriggers;
+        this.includeViews     = normalizeTableFilter(includeViews);
+        this.excludeViews     = normalizeTableFilter(excludeViews);
     }
 
     /**
@@ -136,8 +165,36 @@ public class MigrationWorker extends SwingWorker<Void, String> {
                     String tableName = tableNames.get(i);
                     allTables.add(metadataExtractor.extractTableDefinition(sourceConn, sourceSchema, tableName));
                     publish("  -> Đã đọc metadata bảng " + tableName);
-                    setProgress(5 + (int) (((i + 1) / (float) totalTables) * 25));
+                    setProgress(5 + (int) (((i + 1) / (float) totalTables) * 20));
                 }
+
+                // ── Trích xuất SEQUENCES ────────────────────────────────
+                if (migrateSequences) {
+                    publish("Đang trích xuất SEQUENCES từ schema nguồn...");
+                    allSequences = extractAllSequences(metadataExtractor, sourceConn, sourceSchema, sourceConfig.getType());
+                }
+
+                // ── Trích xuất INDEXES (cho các bảng đã chọn) ─────────
+                if (migrateIndexes) {
+                    publish("Đang trích xuất INDEXES từ schema nguồn...");
+                    allIndexes = extractAllIndexes(metadataExtractor, sourceConn, sourceSchema, sourceConfig.getType(), tableNames);
+                }
+
+                // ── Trích xuất FUNCTIONS / PROCEDURES ─────────────────
+                if (migrateFunctions) {
+                    publish("Đang trích xuất FUNCTIONS/PROCEDURES từ schema nguồn...");
+                    allFunctions = extractAllFunctions(metadataExtractor, sourceConn, sourceSchema, sourceConfig.getType());
+                }
+
+                // ── Trích xuất TRIGGERS (cho các bảng đã chọn) ──────
+                if (migrateTriggers) {
+                    publish("Đang trích xuất TRIGGERS từ schema nguồn...");
+                    allTriggers = extractAllTriggers(metadataExtractor, sourceConn, sourceSchema, sourceConfig.getType(), tableNames);
+                }
+
+                // ── Trích xuất VIEWS (với topological sort) ────────
+                publish("Đang trích xuất VIEWS từ schema nguồn...");
+                allViews = extractAllViews(metadataExtractor, sourceConn, sourceSchema, sourceConfig.getType());
 
                 SqlDialect sourceDialect = DialectFactory.getDialect(sourceConfig.getType());
                 SqlDialect targetDialect = DialectFactory.getDialect(targetConfig.getType());
@@ -153,7 +210,20 @@ public class MigrationWorker extends SwingWorker<Void, String> {
                 if (!isDataOnly) {
                     publish("--- BẮT ĐẦU TẠO CẤU TRÚC BẢNG (DDL) TRÊN TARGET ---");
                     runCreateTablesPhase(targetConn, allTables, targetDialect);
-                    setProgress(60);
+                    setProgress(45);
+
+                    // Phase 2: TẠO SEQUENCES (sau table, trước data — vì trigger dùng sequence)
+                    if (migrateSequences) {
+                        publish("--- TẠO SEQUENCES TRÊN TARGET ---");
+                        runCreateSequencesPhase(targetConn, allSequences, targetDialect);
+                    }
+
+                    // Phase 3: TẠO FUNCTIONS/PROCEDURES (trước trigger — trigger có thể gọi function)
+                    if (migrateFunctions) {
+                        publish("--- TẠO FUNCTIONS/PROCEDURES TRÊN TARGET ---");
+                        runCreateFunctionsPhase(targetConn, allFunctions, sourceConfig.getType(), targetDialect);
+                    }
+                    setProgress(50);
                 } else {
                     publish("Bỏ qua bước tạo cấu trúc do chọn chế độ Data Only.");
                     setProgress(60);
@@ -223,9 +293,32 @@ public class MigrationWorker extends SwingWorker<Void, String> {
                 if (!isDataOnly) {
                     publish("--- BẮT ĐẦU THÊM KHÓA NGOẠI (FOREIGN KEYS) ---");
                     runAddForeignKeysPhase(targetConn, allTables, targetDialect);
+
+                    // Indexes: sau FK + sau data — index cần data để build
+                    if (migrateIndexes) {
+                        publish("--- TẠO INDEXES TRÊN TARGET ---");
+                        runCreateIndexesPhase(targetConn, allIndexes, targetDialect);
+                    }
+
+                    // Triggers: sau functions/data
+                    if (migrateTriggers) {
+                        publish("--- TẠO TRIGGERS TRÊN TARGET ---");
+                        runCreateTriggersPhase(targetConn, allTriggers, sourceConfig.getType(), targetDialect);
+                    }
                 } else {
                     publish("Bỏ qua bước thêm khóa ngoại do chọn chế độ Data Only.");
                 }
+
+                // ── VIEWS: luôn chạy cuối cùng (phụ thuộc tables đã tạo) ──
+                publish("--- TẠO VIEWS TRÊN TARGET ---");
+                runCreateViewsPhase(
+                        targetConn,
+                        allViews,
+                        sourceSchema,
+                        targetSchema,
+                        sourceConfig.getType(),
+                        targetDialect
+                );
             }
 
             setProgress(100);
@@ -665,6 +758,520 @@ public class MigrationWorker extends SwingWorker<Void, String> {
         return "42804".equals(sqlState)
                 || message.contains("ora-02267")
                 || (message.contains("foreign key") && message.contains("incompatible"));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // SEQUENCE EXTRACTION HELPERS
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /**
+     * Trích xuất toàn bộ sequences từ schema nguồn.
+     * Bỏ qua system sequences (ISEQ$$, BIN$, DR$).
+     */
+    private List<SequenceDefinition> extractAllSequences(
+            MetadataExtractor extractor,
+            Connection conn,
+            String schema,
+            DatabaseType dbType
+    ) throws SQLException {
+        List<SequenceDefinition> result = new ArrayList<>();
+        List<String> names = extractor.getSequenceNames(conn, schema);
+        for (String name : names) {
+            SequenceDefinition seq = extractor.extractSequenceDefinition(conn, schema, name, dbType);
+            if (seq != null && !seq.isSystemSequence()) {
+                seq.setSourceSchema(schema);
+                seq.setTargetSchema(targetSchema);
+                result.add(seq);
+            }
+        }
+        publish("  -> Tim thay " + result.size() + " sequences hop le.");
+        return result;
+    }
+
+    /**
+     * Trích xuất toàn bộ indexes từ các bảng đã chọn.
+     * Bỏ qua system indexes (pg_*, sql_*, PK indexes, implicit constraint indexes).
+     */
+    private List<IndexDefinition> extractAllIndexes(
+            MetadataExtractor extractor,
+            Connection conn,
+            String schema,
+            DatabaseType dbType,
+            List<String> tableNames
+    ) throws SQLException {
+        List<IndexDefinition> result = new ArrayList<>();
+        for (String tableName : tableNames) {
+            ensureNotCancelled();
+            List<String> idxNames = extractor.getIndexNames(conn, schema, tableName);
+            for (String idxName : idxNames) {
+                IndexDefinition idx = extractor.extractIndexDefinition(conn, schema, idxName, dbType);
+                if (idx != null && !idx.isSystemIndex() && idx.isMigratable()) {
+                    idx.setSourceSchema(schema);
+                    idx.setTargetSchema(targetSchema);
+                    result.add(idx);
+                    publish("  -> Index: " + idxName + " tren bang " + tableName
+                            + " (unique=" + idx.isUnique()
+                            + ", type=" + idx.getIndexType() + ")");
+                } else if (idx != null && !idx.isMigratable()) {
+                    publish("  -> Bo qua index " + idxName
+                            + " (loai " + idx.getIndexType() + " khong ho tro migrate)");
+                }
+            }
+        }
+        publish("  -> Tim thay " + result.size() + " indexes hop le.");
+        return result;
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // FUNCTION / PROCEDURE EXTRACTION
+    // ─────────────────────────────────────────────────────────────────────────
+
+    private List<FunctionDefinition> extractAllFunctions(
+            MetadataExtractor extractor,
+            Connection conn,
+            String schema,
+            DatabaseType dbType
+    ) throws SQLException {
+        List<FunctionDefinition> result = new ArrayList<>();
+        List<String> names = extractor.getFunctionNames(conn, schema);
+        for (String name : names) {
+            ensureNotCancelled();
+            FunctionDefinition fn = extractor.extractFunctionDefinition(conn, schema, name, dbType);
+            if (fn != null) {
+                fn.setSourceSchema(schema);
+                fn.setTargetSchema(targetSchema);
+                result.add(fn);
+                publish("  -> Function/Procedure: " + name + " (" + fn.getFunctionType() + ")");
+            }
+        }
+        publish("  -> Tim thay " + result.size() + " functions/procedures.");
+        return result;
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // TRIGGER EXTRACTION
+    // ─────────────────────────────────────────────────────────────────────────
+
+    private List<TriggerDefinition> extractAllTriggers(
+            MetadataExtractor extractor,
+            Connection conn,
+            String schema,
+            DatabaseType dbType,
+            List<String> tableNames
+    ) throws SQLException {
+        List<TriggerDefinition> result = new ArrayList<>();
+        for (String tableName : tableNames) {
+            ensureNotCancelled();
+            List<String> triggerNames = extractor.getTriggerNamesForTable(conn, schema, tableName);
+            for (String trigName : triggerNames) {
+                TriggerDefinition trig = extractor.extractTriggerDefinition(conn, schema, trigName, dbType);
+                if (trig != null) {
+                    trig.setSourceSchema(schema);
+                    trig.setTargetSchema(targetSchema);
+                    result.add(trig);
+                    publish("  -> Trigger: " + trigName + " tren " + tableName);
+                }
+            }
+        }
+        publish("  -> Tim thay " + result.size() + " triggers.");
+        return result;
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // SEQUENCE PHASE
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /**
+     * Tạo sequences trên target database.
+     * Chạy SAU khi tạo tables (Phase 1) và TRƯỚC khi migrate data.
+     * Lý do: Trigger có thể gọi sequence.NEXTVAL, nên sequence cần tồn tại trước.
+     */
+    private void runCreateSequencesPhase(
+            Connection targetConn,
+            List<SequenceDefinition> sequences,
+            SqlDialect targetDialect
+    ) throws SQLException {
+        if (sequences.isEmpty()) {
+            publish("  -> Khong co sequence nao de tao.");
+            return;
+        }
+
+        try (Statement stmt = targetConn.createStatement()) {
+            for (SequenceDefinition seq : sequences) {
+                ensureNotCancelled();
+                try {
+                    String createSql = targetDialect.buildCreateSequenceSql(seq);
+                    stmt.execute(normalizeSqlForJdbc(createSql));
+                    publish("  -> Da tao sequence: " + seq.getSequenceName());
+                } catch (SQLException e) {
+                    if (isSequenceAlreadyExistsError(e)) {
+                        publish("  -> Bo qua sequence da ton tai: " + seq.getSequenceName());
+                    } else {
+                        publish("  -> LOI tao sequence " + seq.getSequenceName()
+                                + ": " + e.getMessage());
+                    }
+                }
+            }
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // FUNCTION / PROCEDURE PHASE
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /**
+     * Tạo functions và procedures trên target database.
+     * Chạy SAU sequence, TRƯỚC trigger — vì trigger có thể gọi function.
+     */
+    private void runCreateFunctionsPhase(
+            Connection targetConn,
+            List<FunctionDefinition> functions,
+            DatabaseType sourceDbType,
+            SqlDialect targetDialect
+    ) throws SQLException {
+        if (functions.isEmpty()) {
+            publish("  -> Khong co function/procedure nao de tao.");
+            return;
+        }
+
+        OracleToPgsqlTransformer transformer = null;
+        if (sourceDbType == DatabaseType.ORACLE && targetDialect instanceof PostgresDialect) {
+            transformer = new OracleToPgsqlTransformer();
+            publish("  -> Oracle -> PostgreSQL: bat dau transform PL/SQL...");
+        }
+
+        try (Statement stmt = targetConn.createStatement()) {
+            for (FunctionDefinition fn : functions) {
+                ensureNotCancelled();
+
+                // Detect unsupported features
+                if (fn.getFunctionBody() != null) {
+                    List<String> warnings = OracleToPgsqlTransformer.detectUnsupportedFeatures(fn.getFunctionBody());
+                    for (String w : warnings) {
+                        publish("  -> [WARN] " + fn.getFunctionName() + ": " + w);
+                    }
+                }
+
+                List<String> stmts = targetDialect.buildCreateFunctionSql(fn, transformer);
+                for (String sql : stmts) {
+                    if (sql == null || sql.isBlank()) continue;
+                    try {
+                        stmt.execute(normalizeSqlForJdbc(sql));
+                        publish("  -> Da tao " + fn.getFunctionType() + ": " + fn.getFunctionName());
+                    } catch (SQLException e) {
+                        if (isFunctionAlreadyExistsError(e)) {
+                            publish("  -> Bo qua " + fn.getFunctionType() + " da ton tai: " + fn.getFunctionName());
+                        } else {
+                            publish("  -> LOI tao " + fn.getFunctionType() + " " + fn.getFunctionName()
+                                    + ": " + e.getMessage());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // TRIGGER PHASE
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /**
+     * Tạo triggers trên target database.
+     * Chạy SAU function (vì trigger body có thể gọi function).
+     */
+    private void runCreateTriggersPhase(
+            Connection targetConn,
+            List<TriggerDefinition> triggers,
+            DatabaseType sourceDbType,
+            SqlDialect targetDialect
+    ) throws SQLException {
+        if (triggers.isEmpty()) {
+            publish("  -> Khong co trigger nao de tao.");
+            return;
+        }
+
+        OracleToPgsqlTransformer transformer = null;
+        if (sourceDbType == DatabaseType.ORACLE && targetDialect instanceof PostgresDialect) {
+            transformer = new OracleToPgsqlTransformer();
+            publish("  -> Oracle -> PostgreSQL: bat dau transform trigger body...");
+        }
+
+        try (Statement stmt = targetConn.createStatement()) {
+            for (TriggerDefinition trig : triggers) {
+                ensureNotCancelled();
+
+                // Detect unsupported features
+                if (trig.getTriggerBody() != null) {
+                    List<String> warnings = OracleToPgsqlTransformer.detectUnsupportedFeatures(trig.getTriggerBody());
+                    for (String w : warnings) {
+                        publish("  -> [WARN] " + trig.getTriggerName() + ": " + w);
+                    }
+                }
+
+                List<String> stmts = targetDialect.buildCreateTriggerSql(trig, transformer);
+                for (String sql : stmts) {
+                    if (sql == null || sql.isBlank()) continue;
+                    try {
+                        stmt.execute(normalizeSqlForJdbc(sql));
+                        publish("  -> Da tao trigger: " + trig.getTriggerName()
+                                + " tren " + trig.getTableName());
+                    } catch (SQLException e) {
+                        if (isTriggerAlreadyExistsError(e)) {
+                            publish("  -> Bo qua trigger da ton tai: " + trig.getTriggerName());
+                        } else {
+                            publish("  -> LOI tao trigger " + trig.getTriggerName()
+                                    + ": " + e.getMessage());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // INDEX PHASE
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /**
+     * Tạo indexes trên target database.
+     * Chạy SAU khi migrate data (Phase 3) và SAU khi thêm FK (Phase 4).
+     * Lý do: Index cần dữ liệu để build; tạo sau FK để tránh conflict.
+     */
+    private void runCreateIndexesPhase(
+            Connection targetConn,
+            List<IndexDefinition> indexes,
+            SqlDialect targetDialect
+    ) throws SQLException {
+        if (indexes.isEmpty()) {
+            publish("  -> Khong co index nao de tao.");
+            return;
+        }
+
+        try (Statement stmt = targetConn.createStatement()) {
+            int total = indexes.size();
+            for (int i = 0; i < total; i++) {
+                ensureNotCancelled();
+                IndexDefinition idx = indexes.get(i);
+                List<String> stmts = targetDialect.buildCreateIndexSql(idx);
+                for (String idxSql : stmts) {
+                    try {
+                        stmt.execute(normalizeSqlForJdbc(idxSql));
+                        publish("  -> Da tao index: " + idx.getIndexName()
+                                + " tren " + idx.getTableName()
+                                + " (" + (idx.isUnique() ? "UNIQUE" : "BTREE") + ")");
+                    } catch (SQLException e) {
+                        if (isIndexAlreadyExistsError(e)) {
+                            publish("  -> Bo qua index da ton tai: " + idx.getIndexName());
+                        } else {
+                            publish("  -> LOI tao index " + idx.getIndexName()
+                                    + ": " + e.getMessage());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // VIEW EXTRACTION & CREATION
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /**
+     * Trích xuất toàn bộ views từ schema nguồn với topological sort.
+     */
+    private List<ViewDefinition> extractAllViews(
+            MetadataExtractor extractor,
+            Connection conn,
+            String schema,
+            DatabaseType dbType
+    ) throws SQLException {
+        try {
+            List<ViewDefinition> views = extractor.extractViewDefinitionsWithDependencySort(conn, schema, dbType);
+            publish("  -> Tim thay " + views.size() + " views (da sort theo dependency).");
+            return views;
+        } catch (IllegalStateException e) {
+            publish("  -> [WARN] Circular view dependency: " + e.getMessage() + ". Bo qua views.");
+            return new ArrayList<>();
+        }
+    }
+
+    /**
+     * Tạo views trên target database.
+     * Chạy CUỐI CÙNG — views phụ thuộc vào tables đã tạo.
+     * Áp dụng include/exclude filters và Oracle → PostgreSQL transformation nếu cần.
+     */
+    private void runCreateViewsPhase(
+            Connection targetConn,
+            List<ViewDefinition> views,
+            String sourceSchema,
+            String targetSchema,
+            DatabaseType sourceDbType,
+            SqlDialect targetDialect
+    ) throws SQLException {
+        if (views == null || views.isEmpty()) {
+            publish("  -> Khong co view nao de tao.");
+            return;
+        }
+
+        // Apply include/exclude filters
+        List<ViewDefinition> filtered = applyViewFilters(views);
+        if (filtered.isEmpty()) {
+            publish("  -> Khong co view nao phu hop include/exclude filter.");
+            return;
+        }
+
+        OracleToPgsqlTransformer transformer = null;
+        if (sourceDbType == DatabaseType.ORACLE && targetDialect instanceof PostgresDialect) {
+            transformer = new OracleToPgsqlTransformer();
+            publish("  -> Oracle -> PostgreSQL: bat dau transform view body...");
+        }
+
+        try (Statement stmt = targetConn.createStatement()) {
+            int total = filtered.size();
+            for (int i = 0; i < total; i++) {
+                ensureNotCancelled();
+                ViewDefinition vd = filtered.get(i);
+                publish("  -> Tao view: " + vd.getViewName() + " (" + (i + 1) + "/" + total + ")");
+
+                try {
+                    // 1. Transform view body
+                    String transformedBody = transformViewBodySwing(
+                            vd.getSelectClause(),
+                            sourceSchema,
+                            targetSchema,
+                            sourceDbType,
+                            transformer
+                    );
+
+                    // 2. Build ViewDefinition mới với transformed body
+                    ViewDefinition transformedVd = ViewDefinition.builder()
+                            .viewName(vd.getViewName())
+                            .schema(vd.getSchema())
+                            .sourceDialect(vd.getSourceDialect())
+                            .selectClause(transformedBody)
+                            .checkOption(vd.getCheckOption())
+                            .sourceSchema(sourceSchema)
+                            .targetSchema(targetSchema)
+                            .materialized(vd.isMaterialized())
+                            .build();
+
+                    // 3. Build SQL
+                    String createSql = targetDialect.buildCreateViewSql(transformedVd);
+                    if (createSql == null || createSql.isBlank()) {
+                        publish("  -> LOI: Khong the build CREATE VIEW SQL cho " + vd.getViewName());
+                        continue;
+                    }
+
+                    // 4. Execute (replace existing)
+                    String dropSql = "DROP VIEW IF EXISTS " + targetDialect.quoteIdentifier(vd.getViewName());
+                    try {
+                        stmt.execute(dropSql);
+                    } catch (SQLException ignored) {
+                        // ignore if not exists
+                    }
+
+                    stmt.execute(normalizeSqlForJdbc(createSql));
+                    publish("  -> Da tao view: " + vd.getViewName());
+
+                } catch (SQLException e) {
+                    publish("  -> LOI tao view " + vd.getViewName() + ": " + e.getMessage());
+                }
+            }
+        }
+    }
+
+    /**
+     * Transform view body — schema replacement thông minh + Oracle → PG transformation.
+     */
+    private String transformViewBodySwing(
+            String clause,
+            String sourceSchema,
+            String targetSchema,
+            DatabaseType sourceDbType,
+            OracleToPgsqlTransformer transformer
+    ) {
+        if (clause == null) return clause;
+        String result = clause;
+
+        // 1. Schema replacement thông minh
+        if (sourceSchema != null && targetSchema != null
+                && !sourceSchema.equalsIgnoreCase(targetSchema)) {
+            // Unquoted: SCOTT.DEPT → PUBLIC.DEPT
+            result = result.replaceAll(
+                    "(?<![a-zA-Z0-9_'\"])" + java.util.regex.Pattern.quote(sourceSchema) + "\\.([a-zA-Z_][a-zA-Z0-9_]*)",
+                    targetSchema + ".$1"
+            );
+            // Quoted: "SCOTT"."DEPT" → "PUBLIC"."DEPT"
+            result = result.replaceAll(
+                    "\"\\s*" + java.util.regex.Pattern.quote(sourceSchema) + "\\s*\"\\s*\\.",
+                    "\"" + targetSchema + "\"."
+            );
+        }
+
+        // 2. Oracle → PostgreSQL transformation
+        if (transformer != null) {
+            result = transformer.transform(result);
+        }
+
+        return result;
+    }
+
+    /**
+     * Apply include/exclude CSV filters cho views.
+     */
+    private List<ViewDefinition> applyViewFilters(List<ViewDefinition> allViews) {
+        List<ViewDefinition> filtered = new ArrayList<>();
+        for (ViewDefinition vd : allViews) {
+            String normalized = vd.getViewName().toUpperCase(Locale.ROOT);
+            if (!includeViews.isEmpty() && !includeViews.contains(normalized)) {
+                continue;
+            }
+            if (excludeViews.contains(normalized)) {
+                continue;
+            }
+            filtered.add(vd);
+        }
+        return filtered;
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // ERROR DETECTION HELPERS
+    // ─────────────────────────────────────────────────────────────────────────
+
+    private static boolean isSequenceAlreadyExistsError(SQLException e) {
+        if (e == null) return false;
+        String sqlState = e.getSQLState();
+        String message = e.getMessage() == null ? "" : e.getMessage().toLowerCase(Locale.ROOT);
+        return "42P07".equals(sqlState)  // PostgreSQL
+                || message.contains("already exists");
+    }
+
+    private static boolean isFunctionAlreadyExistsError(SQLException e) {
+        if (e == null) return false;
+        String sqlState = e.getSQLState();
+        String message = e.getMessage() == null ? "" : e.getMessage().toLowerCase(Locale.ROOT);
+        return "42P07".equals(sqlState)
+                || "42723".equals(sqlState)
+                || message.contains("already exists")
+                || message.contains("duplicate function");
+    }
+
+    private static boolean isTriggerAlreadyExistsError(SQLException e) {
+        if (e == null) return false;
+        String sqlState = e.getSQLState();
+        String message = e.getMessage() == null ? "" : e.getMessage().toLowerCase(Locale.ROOT);
+        return "42P07".equals(sqlState)
+                || message.contains("already exists")
+                || message.contains("trigger");
+    }
+
+    private static boolean isIndexAlreadyExistsError(SQLException e) {
+        if (e == null) return false;
+        String sqlState = e.getSQLState();
+        String message = e.getMessage() == null ? "" : e.getMessage().toLowerCase(Locale.ROOT);
+        return "42P07".equals(sqlState)   // PostgreSQL
+                || message.contains("already exists")
+                || message.contains("duplicate key");
     }
 
     /**
