@@ -188,7 +188,7 @@ public class DataTransferService {
                             case Types.DATE -> targetPstmt.setDate(i, rs.getDate(i));
                             case Types.TIME -> targetPstmt.setTime(i, rs.getTime(i));
                             default ->
-                                    // Truyền explicit JDBC type đềEtránh lỗi Oracle-specific object (vd: oracle.sql.TIMESTAMP)
+                                    // Truyền explicit JDBC type để tránh lỗi Oracle-specific object (vd: oracle.sql.TIMESTAMP)
                                     targetPstmt.setObject(i, value, jdbcType);
                         }
                     }

@@ -587,8 +587,8 @@ public class MigrationWebWorkerService {
                 .targetSchema(targetSchema)
                 .build();
 
-        // 2. Build SQL
-        String createSql = targetDialect.buildCreateViewSql(vd);
+        // 2. Build SQL — pass targetSchema to ensure schema qualification via tokenizer
+        String createSql = targetDialect.buildCreateViewSql(vd, targetSchema);
         if (createSql == null || createSql.isBlank()) {
             throw new SQLException("Cannot build CREATE VIEW SQL for: " + vd.getViewName());
         }
@@ -689,6 +689,13 @@ public class MigrationWebWorkerService {
             List<String> warnings = OracleToPgsqlTransformer.detectUnsupportedFeatures(result);
             for (String warning : warnings) {
                 System.err.println("  [VIEW-TRANSFORM-WARN] " + warning);
+            }
+
+            // 3. Tokenizer-based schema qualification — catch-all cho bare table names
+            //    không có schema prefix và chưa được xử lý bởi regex ở trên.
+            //    Chỉ áp dụng khi Oracle → PostgreSQL và có targetSchema.
+            if (targetSchema != null && !targetSchema.isBlank()) {
+                result = PostgresDialect.qualifyUnqualifiedTableReferences(result, targetSchema.toLowerCase());
             }
         }
 
@@ -1068,8 +1075,9 @@ public class MigrationWebWorkerService {
                 List<String> fnSqls = targetDialect.buildCreateFunctionSql(fn, transformer);
                 for (String fnSql : fnSqls) {
                     if (fnSql == null || fnSql.isBlank()) continue;
+                    String normalized = normalizeSqlForJdbc(fnSql);
                     try {
-                        stmt.execute(normalizeSqlForJdbc(fnSql));
+                        stmt.execute(normalized);
                         successCount++;
                     } catch (SQLException e) {
                         if (isFunctionAlreadyExistsError(e)) {
@@ -1078,6 +1086,7 @@ public class MigrationWebWorkerService {
                             errorCount++;
                             String fnError = "Loi tao function/procedure " + fnName + ": " + e.getMessage();
                             System.err.println(fnError);
+                            System.err.println("  [DEBUG] " + getSqlContextAt(normalized, e));
                             broadcastStatus(92, "RUNNING", fnError, true);
                         }
                     }
@@ -1170,5 +1179,18 @@ public class MigrationWebWorkerService {
         return "42P06".equals(sqlState)
                 || (message.contains("already exists") && message.contains("trigger"))
                 || message.contains("ora-00955");
+    }
+
+    private static String getSqlContextAt(String sql, SQLException e) {
+        try {
+            java.util.regex.Matcher m = java.util.regex.Pattern.compile("Position: (\\d+)").matcher(e.getMessage());
+            if (!m.find()) return sql.substring(0, Math.min(300, sql.length()));
+            int pos = Integer.parseInt(m.group(1));
+            int start = Math.max(0, pos - 40);
+            int end = Math.min(sql.length(), pos + 40);
+            return "pos " + pos + ": ..." + sql.substring(start, end) + "...";
+        } catch (Exception ex) {
+            return sql.substring(0, Math.min(300, sql.length()));
+        }
     }
 }

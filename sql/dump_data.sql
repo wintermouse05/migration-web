@@ -114,41 +114,37 @@ ALTER TABLE scott.order_items
 -- ============================================================================
 
 -- Customers
-INSERT INTO scott.customers (customer_name, email, city, country, status) VALUES
-('Nguyen Van A', 'a.nguyen@email.com', 'Ho Chi Minh', 'Vietnam', 'ACTIVE'),
-('Tran Thi B',   'b.tran@email.com',  'Ha Noi',     'Vietnam', 'ACTIVE'),
-('Le Van C',     'c.le@email.com',    'Da Nang',    'Vietnam', 'INACTIVE'),
-('Pham Thi D',   'd.pham@email.com',  'Can Tho',    'Vietnam', 'ACTIVE'),
-('Hoang Van E',  'e.hoang@email.com', 'Hue',        'Vietnam', 'SUSPENDED');
+INSERT INTO scott.customers (customer_name, email, city, country, status) VALUES ('Nguyen Van A', 'a.nguyen@email.com', 'Ho Chi Minh', 'Vietnam', 'ACTIVE');
+INSERT INTO scott.customers (customer_name, email, city, country, status) VALUES ('Tran Thi B',   'b.tran@email.com',  'Ha Noi',     'Vietnam', 'ACTIVE');
+INSERT INTO scott.customers (customer_name, email, city, country, status) VALUES ('Le Van C',     'c.le@email.com',    'Da Nang',    'Vietnam', 'INACTIVE');
+INSERT INTO scott.customers (customer_name, email, city, country, status) VALUES ('Pham Thi D',   'd.pham@email.com',  'Can Tho',    'Vietnam', 'ACTIVE');
+INSERT INTO scott.customers (customer_name, email, city, country, status) VALUES ('Hoang Van E',  'e.hoang@email.com', 'Hue',        'Vietnam', 'SUSPENDED');
 
 -- Products
-INSERT INTO scott.products (product_name, category, price, stock) VALUES
-('Laptop Dell XPS 15',  'Electronics', 35000000, 25),
-('iPhone 15 Pro',        'Electronics', 28000000, 50),
-('Samsung Galaxy S24',   'Electronics', 22000000, 40),
-('iPad Air M2',          'Electronics', 15000000, 30),
-('MacBook Pro 14',       'Electronics', 42000000, 15),
-('Sony WH-1000XM5',      'Accessories',  8500000, 60),
-('AirPods Pro 2',         'Accessories',  5500000, 80),
-('Apple Watch Ultra 2',   'Accessories', 18500000, 20);
+INSERT INTO scott.products (product_name, category, price, stock) VALUES ('Laptop Dell XPS 15',  'Electronics', 35000000, 25);
+INSERT INTO scott.products (product_name, category, price, stock) VALUES ('iPhone 15 Pro',        'Electronics', 28000000, 50);
+INSERT INTO scott.products (product_name, category, price, stock) VALUES ('Samsung Galaxy S24',   'Electronics', 22000000, 40);
+INSERT INTO scott.products (product_name, category, price, stock) VALUES ('iPad Air M2',          'Electronics', 15000000, 30);
+INSERT INTO scott.products (product_name, category, price, stock) VALUES ('MacBook Pro 14',       'Electronics', 42000000, 15);
+INSERT INTO scott.products (product_name, category, price, stock) VALUES ('Sony WH-1000XM5',      'Accessories',  8500000, 60);
+INSERT INTO scott.products (product_name, category, price, stock) VALUES ('AirPods Pro 2',        'Accessories',  5500000, 80);
+INSERT INTO scott.products (product_name, category, price, stock) VALUES ('Apple Watch Ultra 2', 'Accessories', 18500000, 20);
 
 -- Orders
-INSERT INTO scott.orders (customer_id, order_date, total_amount, status, shipping_city) VALUES
-(1, SYSDATE - 10, 63000000, 'DELIVERED', 'Ho Chi Minh'),
-(2, SYSDATE - 7,  35000000, 'SHIPPED',   'Ha Noi'),
-(1, SYSDATE - 3,  15000000, 'CONFIRMED',  'Ho Chi Minh'),
-(4, SYSDATE - 1,  28000000, 'PENDING',    'Can Tho'),
-(2, SYSDATE,       22000000, 'PENDING',    'Ha Noi');
+INSERT INTO scott.orders (customer_id, order_date, total_amount, status, shipping_city) VALUES (1, SYSDATE - 10, 63000000, 'DELIVERED', 'Ho Chi Minh');
+INSERT INTO scott.orders (customer_id, order_date, total_amount, status, shipping_city) VALUES (2, SYSDATE - 7,  35000000, 'SHIPPED',   'Ha Noi');
+INSERT INTO scott.orders (customer_id, order_date, total_amount, status, shipping_city) VALUES (1, SYSDATE - 3,  15000000, 'CONFIRMED', 'Ho Chi Minh');
+INSERT INTO scott.orders (customer_id, order_date, total_amount, status, shipping_city) VALUES (4, SYSDATE - 1,  28000000, 'PENDING',   'Can Tho');
+INSERT INTO scott.orders (customer_id, order_date, total_amount, status, shipping_city) VALUES (2, SYSDATE,       22000000, 'PENDING',   'Ha Noi');
 
 -- Order Items
-INSERT INTO scott.order_items (order_id, product_id, quantity, unit_price, discount_pct) VALUES
-(1, 1, 1, 35000000,  0),
-(1, 6, 1,  8500000,  5),
-(1, 7, 2,  5500000,  0),
-(2, 2, 1, 28000000, 10),
-(3, 4, 1, 15000000,  0),
-(4, 3, 1, 22000000,  0),
-(5, 5, 1, 42000000,  0);
+INSERT INTO scott.order_items (order_id, product_id, quantity, unit_price, discount_pct) VALUES (1, 1, 1, 35000000,  0);
+INSERT INTO scott.order_items (order_id, product_id, quantity, unit_price, discount_pct) VALUES (1, 6, 1,  8500000,  5);
+INSERT INTO scott.order_items (order_id, product_id, quantity, unit_price, discount_pct) VALUES (1, 7, 2,  5500000,  0);
+INSERT INTO scott.order_items (order_id, product_id, quantity, unit_price, discount_pct) VALUES (2, 2, 1, 28000000, 10);
+INSERT INTO scott.order_items (order_id, product_id, quantity, unit_price, discount_pct) VALUES (3, 4, 1, 15000000,  0);
+INSERT INTO scott.order_items (order_id, product_id, quantity, unit_price, discount_pct) VALUES (4, 3, 1, 22000000,  0);
+INSERT INTO scott.order_items (order_id, product_id, quantity, unit_price, discount_pct) VALUES (5, 5, 1, 42000000,  0);
 
 -- Update total_amount
 UPDATE scott.orders SET total_amount = (

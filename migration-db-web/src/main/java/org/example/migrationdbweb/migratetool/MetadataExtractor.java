@@ -1128,8 +1128,8 @@ public class MetadataExtractor {
             }
         }
 
-        // Lấy arguments từ USER_ARGUMENTS
-        List<FunctionDefinition.FunctionArgument> arguments = extractOracleFunctionArguments(conn, functionName);
+        // Lấy arguments và return type từ USER_ARGUMENTS
+        ArgumentsAndReturnType argsAndReturn = extractOracleFunctionArgumentsAndReturn(conn, functionName);
 
         FunctionDefinition.FunctionType fType =
                 "FUNCTION".equalsIgnoreCase(objectType)
@@ -1144,17 +1144,22 @@ public class MetadataExtractor {
                 .language("PL/SQL")
                 .functionBody(bodyBuilder.toString())
                 .sourceSchema(schema)
-                .arguments(arguments)
+                .arguments(argsAndReturn.arguments)
+                .returnType(argsAndReturn.returnType)
                 .build();
     }
 
     /**
-     * Trích xuất danh sách tham số của một function/procedure Oracle từ USER_ARGUMENTS.
+     * Trích xuất danh sách tham số VÀ return type của một function Oracle từ USER_ARGUMENTS.
+     *
+     * Trong USER_ARGUMENTS, khi ARGUMENT_NAME là NULL → đó là row chứa return type.
+     * Khi DATA_TYPE là NULL → đó là PROCEDURE (không có return).
      */
-    private List<FunctionDefinition.FunctionArgument> extractOracleFunctionArguments(
+    private ArgumentsAndReturnType extractOracleFunctionArgumentsAndReturn(
             Connection conn, String functionName
     ) throws SQLException {
         List<FunctionDefinition.FunctionArgument> args = new ArrayList<>();
+        String returnType = null;
         String sql = """
             SELECT
                 ARGUMENT_NAME,
@@ -1175,8 +1180,14 @@ public class MetadataExtractor {
                 while (rs.next()) {
                     String argName = rs.getString("ARGUMENT_NAME");
                     String dataType = rs.getString("DATA_TYPE");
-                    String inOut = rs.getString("IN_OUT");
 
+                    // ARGUMENT_NAME IS NULL → đây là return type row (FUNCTION, không phải PROCEDURE)
+                    if (argName == null) {
+                        returnType = dataType; // DATA_TYPE của return row chính là kiểu trả về
+                        continue;
+                    }
+
+                    String inOut = rs.getString("IN_OUT");
                     FunctionDefinition.FunctionArgument.ArgumentMode mode;
                     if ("OUT".equalsIgnoreCase(inOut)) {
                         mode = FunctionDefinition.FunctionArgument.ArgumentMode.OUT;
@@ -1195,8 +1206,14 @@ public class MetadataExtractor {
                 }
             }
         }
-        return args;
+        return new ArgumentsAndReturnType(args, returnType);
     }
+
+    /** Container cho arguments + return type */
+    private record ArgumentsAndReturnType(
+            List<FunctionDefinition.FunctionArgument> arguments,
+            String returnType
+    ) {}
 
     // ─────────────────────────────────────────────────────────────
     // ORACLE TRIGGER DDL EXTRACTION (DBMS_METADATA)

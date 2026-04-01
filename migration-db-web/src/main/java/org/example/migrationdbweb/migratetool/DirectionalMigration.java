@@ -667,11 +667,15 @@ public abstract class DirectionalMigration {
                         List<String> fnSqls = targetDialect.buildCreateFunctionSql(fn, transformer);
                         for (String fnSql : fnSqls) {
                             if (fnSql == null || fnSql.isBlank()) continue;
+                            String normalized = normalizeSqlForJdbc(fnSql);
                             try {
-                                st.execute(normalizeSqlForJdbc(fnSql));
+                                st.execute(normalized);
                                 System.out.println("Created function: " + fn.getFunctionName());
                             } catch (SQLException e) {
                                 System.err.println("Loi tao function " + fn.getFunctionName() + ": " + e.getMessage());
+                                System.err.println("  [DEBUG] First 200 chars: " + normalized.substring(0, Math.min(200, normalized.length())));
+                                System.err.println("  [DEBUG] Position " + e.getMessage().replaceAll(".*Position: (\\d+).*", "$1") + " context: " +
+                                        getSqlContextAt(normalized, e));
                             }
                         }
                     }
@@ -702,13 +706,14 @@ public abstract class DirectionalMigration {
                 System.out.println("\n--- PHASE 8: CREATING VIEWS ---");
                 try (Statement st = targetConn.createStatement()) {
                     for (ViewDefinition vd : allViews) {
-                        String viewSql = targetDialect.buildCreateViewSql(vd);
+                        String viewSql = targetDialect.buildCreateViewSql(vd, targetSchema);
                         if (viewSql == null || viewSql.isBlank()) continue;
                         try {
                             st.execute(normalizeSqlForJdbc(viewSql));
                             System.out.println("Created view: " + vd.getViewName());
                         } catch (SQLException e) {
                             System.err.println("Loi tao view " + vd.getViewName() + ": " + e.getMessage());
+                            System.err.println("  [DEBUG] " + getSqlContextAt(viewSql, e));
                         }
                     }
                 }
@@ -1114,6 +1119,20 @@ public abstract class DirectionalMigration {
         }
 
         return null;
+    }
+
+    private static String getSqlContextAt(String sql, SQLException e) {
+        try {
+            String msg = e.getMessage();
+            java.util.regex.Matcher m = java.util.regex.Pattern.compile("Position: (\\d+)").matcher(msg);
+            if (!m.find()) return sql.substring(0, Math.min(200, sql.length()));
+            int pos = Integer.parseInt(m.group(1));
+            int start = Math.max(0, pos - 30);
+            int end = Math.min(sql.length(), pos + 30);
+            return "..." + sql.substring(start, end) + "...";
+        } catch (Exception ex) {
+            return sql.substring(0, Math.min(200, sql.length()));
+        }
     }
 
     protected static int getEnvAsInt(String name, int defaultValue) {

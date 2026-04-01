@@ -1220,8 +1220,8 @@ public class MigrationWorker extends SwingWorker<Void, String> {
 
             // a) Quoted UPPERCASE: "SCOTT"."PRODUCTS" -> "public"."products"
             result = result.replaceAll(
-                    "\"\\\\s*" + java.util.regex.Pattern.quote(sourceSchema) + "\\\\s*\"\\\\s*\\\\.",
-                    "\"" + targetSchema.toLowerCase() + "\".\\`"
+                    "\"" + java.util.regex.Pattern.quote(sourceSchema) + "\"\\\\s*\\\\.\\\\s*",
+                    "\"" + targetSchema.toLowerCase() + "\".\""
             );
 
             // b) Unquoted identifier: SCOTT.PRODUCTS -> public.products
@@ -1232,8 +1232,8 @@ public class MigrationWorker extends SwingWorker<Void, String> {
 
             // c) Quoted table name after quoted schema: "public"."PRODUCTS" -> "public"."products"
             result = result.replaceAll(
-                    "\"\\\\s*" + java.util.regex.Pattern.quote(targetSchema.toLowerCase()) + "\\\\s*\"\\\\s*\\\\.\\\\s*\"([^\"]+)\"\\\\s*",
-                    "\"" + targetSchema.toLowerCase() + "\".\\`$1\""
+                    "\"" + java.util.regex.Pattern.quote(targetSchema.toLowerCase()) + "\"\\\\s*\\\\.\\\\s*\"([^\"]+)\"",
+                    "\"" + targetSchema.toLowerCase() + "\".\"$1\""
             );
 
             // d) Lowercase source schema (Oracle view body may use lowercase "scott.products")

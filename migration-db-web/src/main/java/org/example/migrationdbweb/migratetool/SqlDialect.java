@@ -170,9 +170,15 @@ public interface SqlDialect {
      * Build câu lệnh CREATE VIEW hoặc CREATE OR REPLACE VIEW.
      *
      * @param viewDef ViewDefinition chứa tên và selectClause
+     * @param targetSchema schema đích để qualify các table reference không có schema.
+     *                     Chỉ áp dụng cho Oracle → PostgreSQL khi view SELECT không có schema prefix.
      * @return câu lệnh SQL đầy đủ, ví dụ:
      *         CREATE OR REPLACE VIEW "my_view" AS SELECT ...
      */
+    default String buildCreateViewSql(ViewDefinition viewDef, String targetSchema) {
+        return buildCreateViewSql(viewDef);
+    }
+
     default String buildCreateViewSql(ViewDefinition viewDef) {
         StringBuilder sql = new StringBuilder();
         sql.append("CREATE OR REPLACE VIEW ");
