@@ -60,6 +60,14 @@ public class SqlGenerator {
             .append(placeholders)
             .append(")");
 
+        // Chỉ thêm ON CONFLICT DO NOTHING khi KHÔNG có copyNewOnly.
+        // Khi copyNewOnly=true: DataTransferService đã kiểm tra PK trước mỗi INSERT
+        // → ON CONFLICT DO NOTHING không bao giờ trigger (vì row đã tồn tại bị skip).
+        // Khi copyNewOnly=false: không kiểm tra trùng → ON CONFLICT DO NOTHING
+        //   không cần thiết (vì bản ghi mới không thể conflict).
+        // Do đó, ON CONFLICT DO NOTHING luôn luôn dư thừa ở đây.
+        // Giữ lại chỉ khi cần đảm bảo idempotent trong trường hợp copyNewOnly=false
+        // và user muốn re-run mà không lỗi trùng key.
         if (targetDialect instanceof PostgresDialect && !table.getPrimaryKeys().isEmpty()) {
             String conflictColumns = table.getPrimaryKeys().stream()
                 .map(targetDialect::quoteIdentifier)

@@ -1,9 +1,4 @@
 package org.example.migrationdbweb.migratetool;
-
-
-
-
-
 import java.sql.Connection;
 import java.sql.SQLException;
 import java.sql.Statement;
@@ -48,6 +43,8 @@ public class MigrationWorker extends SwingWorker<Void, String> {
     private final boolean migrateIndexes;
     private final boolean migrateFunctions;
     private final boolean migrateTriggers;
+    private final boolean migrateViews;
+    private final boolean replaceExistingViews;
     private final Set<String> includeViews;
     private final Set<String> excludeViews;
 
@@ -69,8 +66,11 @@ public class MigrationWorker extends SwingWorker<Void, String> {
             boolean migrateIndexes,
             boolean migrateFunctions,
             boolean migrateTriggers,
+            boolean migrateViews,
+            boolean replaceExistingViews,
             Set<String> includeViews,
-            Set<String> excludeViews
+            Set<String> excludeViews,
+            MigrationRetryPolicy retryPolicy
     ) {
         this.ui = ui;
         this.isStructureOnly = isStructureOnly;
@@ -85,19 +85,23 @@ public class MigrationWorker extends SwingWorker<Void, String> {
         this.limitRows = (limitRows != null && limitRows > 0) ? limitRows : null;
         this.includeTables = normalizeTableFilter(includeTables);
         this.excludeTables = normalizeTableFilter(excludeTables);
-        this.retryPolicy = MigrationRetryPolicy.fromEnvironment();
+        // RetryPolicy từ UI  EKHÔNG dùng fromEnvironment() nữa
+        this.retryPolicy = retryPolicy != null ? retryPolicy
+                : MigrationRetryPolicy.fromEnvironment();
 
         // Advanced migration flags (migrate X when selected)
         this.migrateSequences = migrateSequences;
         this.migrateIndexes   = migrateIndexes;
         this.migrateFunctions = migrateFunctions;
         this.migrateTriggers  = migrateTriggers;
+        this.migrateViews     = migrateViews;
+        this.replaceExistingViews = replaceExistingViews;
         this.includeViews     = normalizeTableFilter(includeViews);
         this.excludeViews     = normalizeTableFilter(excludeViews);
     }
 
     /**
-     * CHẠY DƯỚI BACKGROUND THREAD (Không được thao tác UI ở đây)
+     * CHẠY DƯỚI BACKGROUND THREAD (Không được thao tác UI ềEđây)
      */
     @Override
     protected Void doInBackground() throws Exception {
@@ -110,12 +114,12 @@ public class MigrationWorker extends SwingWorker<Void, String> {
 
         try {
             setProgress(0);
-            publish("Đang thiết lập kết nối tới cơ sở dữ liệu...");
+            publish("Đang thiết lập kết nối tới cơ sềEdữ liệu...");
             manager.createPool(sourcePoolId, sourceConfig);
             manager.createPool(targetPoolId, targetConfig);
 
             if (!manager.testConnection(sourcePoolId) || !manager.testConnection(targetPoolId)) {
-                throw new SQLException("Không thể thiết lập kết nối tới Source/Target DB.");
+                throw new SQLException("Không thềEthiết lập kết nối tới Source/Target DB.");
             }
 
             try (Connection sourceConn = manager.getConnection(sourcePoolId);
@@ -193,6 +197,9 @@ public class MigrationWorker extends SwingWorker<Void, String> {
                 }
 
                 // ── Trích xuất VIEWS (với topological sort) ────────
+                // Luôn extract views (cho dù user có chọn migrate views hay không) vì
+                // 1. Filter include/exclude được áp dụng ềEphase tạo
+                // 2. Không extract = phải reconnect lại đềEextract + tạo
                 publish("Đang trích xuất VIEWS từ schema nguồn...");
                 allViews = extractAllViews(metadataExtractor, sourceConn, sourceSchema, sourceConfig.getType());
 
@@ -202,7 +209,7 @@ public class MigrationWorker extends SwingWorker<Void, String> {
                 totalTables = allTables.size();
 
                 if (totalTables == 0) {
-                    publish("Không còn bảng hợp lệ để migrate sau khi đối chiếu tên bảng trên target.");
+                    publish("Không còn bảng hợp lềEđềEmigrate sau khi đối chiếu tên bảng trên target.");
                     setProgress(100);
                     return null;
                 }
@@ -212,30 +219,30 @@ public class MigrationWorker extends SwingWorker<Void, String> {
                     runCreateTablesPhase(targetConn, allTables, targetDialect);
                     setProgress(45);
 
-                    // Phase 2: TẠO SEQUENCES (sau table, trước data — vì trigger dùng sequence)
+                    // Phase 2: TẠO SEQUENCES (sau table, trước data  Evì trigger dùng sequence)
                     if (migrateSequences) {
                         publish("--- TẠO SEQUENCES TRÊN TARGET ---");
                         runCreateSequencesPhase(targetConn, allSequences, targetDialect);
                     }
 
-                    // Phase 3: TẠO FUNCTIONS/PROCEDURES (trước trigger — trigger có thể gọi function)
+                    // Phase 3: TẠO FUNCTIONS/PROCEDURES (trước trigger  Etrigger có thềEgọi function)
                     if (migrateFunctions) {
                         publish("--- TẠO FUNCTIONS/PROCEDURES TRÊN TARGET ---");
                         runCreateFunctionsPhase(targetConn, allFunctions, sourceConfig.getType(), targetDialect);
                     }
                     setProgress(50);
                 } else {
-                    publish("Bỏ qua bước tạo cấu trúc do chọn chế độ Data Only.");
+                    publish("BềEqua bước tạo cấu trúc do chọn chế đềEData Only.");
                     setProgress(60);
                 }
 
                 if (!isStructureOnly) {
-                    publish("--- BẮT ĐẦU CHUYỂN DỮ LIỆU (DML) ---");
+                    publish("--- BẮT ĐẦU CHUYềE DỮ LIềE (DML) ---");
                     SqlGenerator sqlGenerator = new SqlGenerator(sourceDialect, targetDialect);
                     DataTransferService transferService = new DataTransferService(sqlGenerator);
 
                     if (truncateTarget) {
-                        publish("--- TRUNCATE DỮ LIỆU CŨ TRÊN TARGET ---");
+                        publish("--- TRUNCATE DỮ LIềE CŨ TRÊN TARGET ---");
                         runTruncatePhase(targetConn, allTables, targetDialect);
                         if (checkpointStore != null) {
                             checkpointStore.clear();
@@ -252,7 +259,7 @@ public class MigrationWorker extends SwingWorker<Void, String> {
 
                         if (checkpointStore != null && checkpointStore.isTableCompleted(table.getTableName())) {
                             publish("  -> Bo qua bang da migrate truoc do (resume): " + table.getTableName());
-                            setProgress(60 + (int) (((i + 1) / (float) totalTables) * 30));
+                            setProgress(60 + (int) (((i + 1) * 30.0f / totalTables)));
                             continue;
                         }
 
@@ -262,7 +269,7 @@ public class MigrationWorker extends SwingWorker<Void, String> {
                         }
 
                         if (effectiveCopyNewOnly && table.getPrimaryKeys().isEmpty()) {
-                            publish("  -> Bảng " + table.getTableName() + " không có PK, copyNewOnly không thể lọc trùng theo PK.");
+                            publish("  -> Bảng " + table.getTableName() + " không có PK, copyNewOnly không thềElọc trùng theo PK.");
                         }
 
                         publish("Đang sao chép dữ liệu bảng " + table.getTableName() + "...");
@@ -279,14 +286,14 @@ public class MigrationWorker extends SwingWorker<Void, String> {
                         if (checkpointStore != null) {
                             checkpointStore.markTableCompleted(table.getTableName(), result.getTransferredRows());
                         }
-                        publish("  -> Hoàn tất bảng " + table.getTableName()
+                        publish("  -> Hoan tat bang " + table.getTableName()
                                 + " | copied=" + result.getTransferredRows()
                                 + " | skipped=" + result.getSkippedRows()
-                                + (result.isLimitReached() ? " | đạt ngưỡng limit" : ""));
-                        setProgress(60 + (int) (((i + 1) / (float) totalTables) * 30));
+                                + (result.isLimitReached() ? " | dat nguong limit" : ""));
+                        setProgress(60 + (int) ( (i + 1) * 30.0f / totalTables));
                     }
                 } else {
-                    publish("Bỏ qua bước chuyển dữ liệu do chọn chế độ Structure Only.");
+                    publish("Bo qua buoc chuyen du lieu do chon che do Structure Only.");
                     setProgress(90);
                 }
 
@@ -294,7 +301,7 @@ public class MigrationWorker extends SwingWorker<Void, String> {
                     publish("--- BẮT ĐẦU THÊM KHÓA NGOẠI (FOREIGN KEYS) ---");
                     runAddForeignKeysPhase(targetConn, allTables, targetDialect);
 
-                    // Indexes: sau FK + sau data — index cần data để build
+                    // Indexes: sau FK + sau data  Eindex cần data đềEbuild
                     if (migrateIndexes) {
                         publish("--- TẠO INDEXES TRÊN TARGET ---");
                         runCreateIndexesPhase(targetConn, allIndexes, targetDialect);
@@ -306,19 +313,24 @@ public class MigrationWorker extends SwingWorker<Void, String> {
                         runCreateTriggersPhase(targetConn, allTriggers, sourceConfig.getType(), targetDialect);
                     }
                 } else {
-                    publish("Bỏ qua bước thêm khóa ngoại do chọn chế độ Data Only.");
+                    publish("BềEqua bước thêm khóa ngoại do chọn chế đềEData Only.");
                 }
 
-                // ── VIEWS: luôn chạy cuối cùng (phụ thuộc tables đã tạo) ──
-                publish("--- TẠO VIEWS TRÊN TARGET ---");
-                runCreateViewsPhase(
-                        targetConn,
-                        allViews,
-                        sourceSchema,
-                        targetSchema,
-                        sourceConfig.getType(),
-                        targetDialect
-                );
+                // ── VIEWS: chỉ chạy nếu user chọn migrate views ──
+                if (migrateViews) {
+                    publish("--- TẠO VIEWS TRÊN TARGET ---");
+                    runCreateViewsPhase(
+                            targetConn,
+                            allViews,
+                            sourceSchema,
+                            targetSchema,
+                            sourceConfig.getType(),
+                            targetDialect,
+                            replaceExistingViews
+                    );
+                } else {
+                    publish("Bo qua views (khong chon migrate views).");
+                }
             }
 
             setProgress(100);
@@ -349,7 +361,7 @@ public class MigrationWorker extends SwingWorker<Void, String> {
                     publish("  -> Đã tạo bảng " + table.getTableName());
                 } catch (SQLException e) {
                     if (isTableAlreadyExistsError(e)) {
-                        publish("  -> Bỏ qua bảng đã tồn tại: " + table.getTableName());
+                        publish("  -> BềEqua bảng đã tồn tại: " + table.getTableName());
                     } else {
                         throw e;
                     }
@@ -406,7 +418,7 @@ public class MigrationWorker extends SwingWorker<Void, String> {
                         statement.execute(normalizeSqlForJdbc(fkSql));
                     } catch (SQLException e) {
                         if (isConstraintAlreadyExistsError(e) || isIncompatibleForeignKeyError(e)) {
-                            publish("  -> Bỏ qua FK không thể áp dụng cho bảng " + table.getTableName() + ": " + e.getMessage());
+                            publish("  -> BềEqua FK không thềEáp dụng cho bảng " + table.getTableName() + ": " + e.getMessage());
                             continue;
                         }
                         throw e;
@@ -423,7 +435,7 @@ public class MigrationWorker extends SwingWorker<Void, String> {
             SqlDialect targetDialect
     ) throws SQLException {
         if (targetDialect == null) {
-            throw new IllegalArgumentException("Target dialect không hợp lệ");
+            throw new IllegalArgumentException("Target dialect khong hop le");
         }
 
         List<TableDefinition> oracleDeleteFallbackTables = new ArrayList<>();
@@ -451,12 +463,12 @@ public class MigrationWorker extends SwingWorker<Void, String> {
                 } catch (SQLException e) {
                     if (targetDialect instanceof OracleDialect && isTruncateBlockedByForeignKey(e)) {
                         oracleDeleteFallbackTables.add(table);
-                        publish("  -> Bảng " + table.getTableName() + " bị chặn TRUNCATE bởi FK, sẽ fallback sang DELETE.");
+                        publish("  -> Bảng " + table.getTableName() + " bềEchặn TRUNCATE bởi FK, sẽ fallback sang DELETE.");
                         continue;
                     }
 
                     if (isTableNotExistsError(e)) {
-                        publish("  -> Bỏ qua truncate vì bảng chưa tồn tại: " + table.getTableName());
+                        publish("  -> BềEqua truncate vì bảng chưa tồn tại: " + table.getTableName());
                         continue;
                     }
                     throw e;
@@ -493,7 +505,7 @@ public class MigrationWorker extends SwingWorker<Void, String> {
                         deletedAnyInThisPass = true;
                     } catch (SQLException e) {
                         if (isTableNotExistsError(e)) {
-                            publish("  -> Bỏ qua DELETE vì bảng chưa tồn tại: " + table.getTableName());
+                            publish("  -> BềEqua DELETE vì bảng chưa tồn tại: " + table.getTableName());
                             deletedAnyInThisPass = true;
                             continue;
                         }
@@ -518,7 +530,7 @@ public class MigrationWorker extends SwingWorker<Void, String> {
                         .reduce((a, b) -> a + ", " + b)
                         .orElse("unknown");
                 throw new SQLException(
-                        "Không thể dọn dữ liệu cho các bảng Oracle do ràng buộc FK vòng lặp hoặc dữ liệu tham chiếu còn tồn tại: "
+                        "Không thềEdọn dữ liệu cho các bảng Oracle do ràng buộc FK vòng lặp hoặc dữ liệu tham chiếu còn tồn tại: "
                                 + blockedTables
                 );
             }
@@ -530,7 +542,7 @@ public class MigrationWorker extends SwingWorker<Void, String> {
 
     private void ensureNotCancelled() {
         if (isCancelled()) {
-            throw new RuntimeException("Tiến trình đã bị hủy.");
+            throw new RuntimeException("Tiến trình đã bềEhủy.");
         }
     }
 
@@ -610,7 +622,7 @@ public class MigrationWorker extends SwingWorker<Void, String> {
                             publish("    -> Batch " + tableName
                                     + ": +" + justTransferred
                                     + " dòng, tổng=" + totalTransferred
-                                    + ", bỏ qua=" + totalSkipped);
+                                    + ", bềEqua=" + totalSkipped);
                         }
                 );
             } catch (SQLException e) {
@@ -629,7 +641,7 @@ public class MigrationWorker extends SwingWorker<Void, String> {
             }
         }
 
-        throw new SQLException("Không thể hoàn tất migrate cho bảng " + table.getTableName());
+        throw new SQLException("Không thềEhoàn tất migrate cho bảng " + table.getTableName());
     }
 
     private static boolean isRetryableException(SQLException e) {
@@ -672,7 +684,7 @@ public class MigrationWorker extends SwingWorker<Void, String> {
             Thread.sleep(millis);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-            throw new RuntimeException("Tiến trình retry bị gián đoạn.", e);
+            throw new RuntimeException("Tiến trình retry bềEgián đoạn.", e);
         }
     }
 
@@ -689,7 +701,7 @@ public class MigrationWorker extends SwingWorker<Void, String> {
             String targetKey = table.getTableName().toUpperCase(Locale.ROOT);
             TableDefinition existing = uniqueTables.get(targetKey);
             if (existing != null) {
-                publish("  -> Bỏ qua bảng " + table.getTableName()
+                publish("  -> BềEqua bảng " + table.getTableName()
                         + " vì trùng tên vật lý trên Oracle với bảng "
                         + existing.getTableName() + " (" + targetKey + ").");
                 continue;
@@ -720,7 +732,7 @@ public class MigrationWorker extends SwingWorker<Void, String> {
         String sqlState = e.getSQLState();
         String message = e.getMessage() == null ? "" : e.getMessage().toLowerCase(Locale.ROOT);
         return "42710".equals(sqlState)
-                || message.contains("constraint") && message.contains("already exists")
+                || (message.contains("constraint") && message.contains("already exists"))
                 || message.contains("ora-02275");
     }
 
@@ -765,8 +777,8 @@ public class MigrationWorker extends SwingWorker<Void, String> {
     // ─────────────────────────────────────────────────────────────────────────
 
     /**
-     * Trích xuất toàn bộ sequences từ schema nguồn.
-     * Bỏ qua system sequences (ISEQ$$, BIN$, DR$).
+     * Trích xuất toàn bềEsequences từ schema nguồn.
+     * BềEqua system sequences (ISEQ$$, BIN$, DR$).
      */
     private List<SequenceDefinition> extractAllSequences(
             MetadataExtractor extractor,
@@ -789,8 +801,8 @@ public class MigrationWorker extends SwingWorker<Void, String> {
     }
 
     /**
-     * Trích xuất toàn bộ indexes từ các bảng đã chọn.
-     * Bỏ qua system indexes (pg_*, sql_*, PK indexes, implicit constraint indexes).
+     * Trích xuất toàn bềEindexes từ các bảng đã chọn.
+     * BềEqua system indexes (pg_*, sql_*, PK indexes, implicit constraint indexes).
      */
     private List<IndexDefinition> extractAllIndexes(
             MetadataExtractor extractor,
@@ -884,7 +896,7 @@ public class MigrationWorker extends SwingWorker<Void, String> {
     /**
      * Tạo sequences trên target database.
      * Chạy SAU khi tạo tables (Phase 1) và TRƯỚC khi migrate data.
-     * Lý do: Trigger có thể gọi sequence.NEXTVAL, nên sequence cần tồn tại trước.
+     * Lý do: Trigger có thềEgọi sequence.NEXTVAL, nên sequence cần tồn tại trước.
      */
     private void runCreateSequencesPhase(
             Connection targetConn,
@@ -921,7 +933,7 @@ public class MigrationWorker extends SwingWorker<Void, String> {
 
     /**
      * Tạo functions và procedures trên target database.
-     * Chạy SAU sequence, TRƯỚC trigger — vì trigger có thể gọi function.
+     * Chạy SAU sequence, TRƯỚC trigger  Evì trigger có thềEgọi function.
      */
     private void runCreateFunctionsPhase(
             Connection targetConn,
@@ -977,7 +989,7 @@ public class MigrationWorker extends SwingWorker<Void, String> {
 
     /**
      * Tạo triggers trên target database.
-     * Chạy SAU function (vì trigger body có thể gọi function).
+     * Chạy SAU function (vì trigger body có thềEgọi function).
      */
     private void runCreateTriggersPhase(
             Connection targetConn,
@@ -1035,7 +1047,7 @@ public class MigrationWorker extends SwingWorker<Void, String> {
     /**
      * Tạo indexes trên target database.
      * Chạy SAU khi migrate data (Phase 3) và SAU khi thêm FK (Phase 4).
-     * Lý do: Index cần dữ liệu để build; tạo sau FK để tránh conflict.
+     * Lý do: Index cần dữ liệu đềEbuild; tạo sau FK đềEtránh conflict.
      */
     private void runCreateIndexesPhase(
             Connection targetConn,
@@ -1077,7 +1089,7 @@ public class MigrationWorker extends SwingWorker<Void, String> {
     // ─────────────────────────────────────────────────────────────────────────
 
     /**
-     * Trích xuất toàn bộ views từ schema nguồn với topological sort.
+     * Trích xuất toàn bềEviews từ schema nguồn với topological sort.
      */
     private List<ViewDefinition> extractAllViews(
             MetadataExtractor extractor,
@@ -1097,8 +1109,8 @@ public class MigrationWorker extends SwingWorker<Void, String> {
 
     /**
      * Tạo views trên target database.
-     * Chạy CUỐI CÙNG — views phụ thuộc vào tables đã tạo.
-     * Áp dụng include/exclude filters và Oracle → PostgreSQL transformation nếu cần.
+     * Chạy CUỐI CÙNG  Eviews phụ thuộc vào tables đã tạo.
+     * Áp dụng include/exclude filters và Oracle ↁEPostgreSQL transformation nếu cần.
      */
     private void runCreateViewsPhase(
             Connection targetConn,
@@ -1106,7 +1118,8 @@ public class MigrationWorker extends SwingWorker<Void, String> {
             String sourceSchema,
             String targetSchema,
             DatabaseType sourceDbType,
-            SqlDialect targetDialect
+            SqlDialect targetDialect,
+            boolean replaceExistingViews
     ) throws SQLException {
         if (views == null || views.isEmpty()) {
             publish("  -> Khong co view nao de tao.");
@@ -1163,7 +1176,12 @@ public class MigrationWorker extends SwingWorker<Void, String> {
                     }
 
                     // 4. Execute (replace existing)
-                    String dropSql = "DROP VIEW IF EXISTS " + targetDialect.quoteIdentifier(vd.getViewName());
+                    // Schema-qualify đềEtránh drop nhầm view ềEschema khác
+                    String qualifiedViewName = vd.getTargetSchema() != null && !vd.getTargetSchema().isBlank()
+                            ? targetDialect.quoteIdentifier(vd.getTargetSchema())
+                                    + "." + targetDialect.quoteIdentifier(vd.getViewName())
+                            : targetDialect.quoteIdentifier(vd.getViewName());
+                    String dropSql = "DROP VIEW IF EXISTS " + qualifiedViewName;
                     try {
                         stmt.execute(dropSql);
                     } catch (SQLException ignored) {
@@ -1180,8 +1198,10 @@ public class MigrationWorker extends SwingWorker<Void, String> {
         }
     }
 
+
+
     /**
-     * Transform view body — schema replacement thông minh + Oracle → PG transformation.
+     * Transform view body -- schema replacement + Oracle to PostgreSQL transformation.
      */
     private String transformViewBodySwing(
             String clause,
@@ -1193,22 +1213,37 @@ public class MigrationWorker extends SwingWorker<Void, String> {
         if (clause == null) return clause;
         String result = clause;
 
-        // 1. Schema replacement thông minh
+        // 1. Schema replacement -- an toan cho Oracle to PostgreSQL
+        //    PostgreSQL dung lowercase identifiers, Oracle dung UPPERCASE (quoted hoac khong)
         if (sourceSchema != null && targetSchema != null
                 && !sourceSchema.equalsIgnoreCase(targetSchema)) {
-            // Unquoted: SCOTT.DEPT → PUBLIC.DEPT
+
+            // a) Quoted UPPERCASE: "SCOTT"."PRODUCTS" -> "public"."products"
             result = result.replaceAll(
-                    "(?<![a-zA-Z0-9_'\"])" + java.util.regex.Pattern.quote(sourceSchema) + "\\.([a-zA-Z_][a-zA-Z0-9_]*)",
-                    targetSchema + ".$1"
+                    "\"\\\\s*" + java.util.regex.Pattern.quote(sourceSchema) + "\\\\s*\"\\\\s*\\\\.",
+                    "\"" + targetSchema.toLowerCase() + "\".\\`"
             );
-            // Quoted: "SCOTT"."DEPT" → "PUBLIC"."DEPT"
+
+            // b) Unquoted identifier: SCOTT.PRODUCTS -> public.products
             result = result.replaceAll(
-                    "\"\\s*" + java.util.regex.Pattern.quote(sourceSchema) + "\\s*\"\\s*\\.",
-                    "\"" + targetSchema + "\"."
+                    "(?<![a-zA-Z0-9_'\"])" + java.util.regex.Pattern.quote(sourceSchema) + "\\\\.([a-zA-Z_][a-zA-Z0-9_]*)",
+                    targetSchema.toLowerCase() + ".$1"
+            );
+
+            // c) Quoted table name after quoted schema: "public"."PRODUCTS" -> "public"."products"
+            result = result.replaceAll(
+                    "\"\\\\s*" + java.util.regex.Pattern.quote(targetSchema.toLowerCase()) + "\\\\s*\"\\\\s*\\\\.\\\\s*\"([^\"]+)\"\\\\s*",
+                    "\"" + targetSchema.toLowerCase() + "\".\\`$1\""
+            );
+
+            // d) Lowercase source schema (Oracle view body may use lowercase "scott.products")
+            result = result.replaceAll(
+                    "(?i)" + java.util.regex.Pattern.quote(sourceSchema.toLowerCase()) + "\\\\.([a-zA-Z_][a-zA-Z0-9_]*)",
+                    targetSchema.toLowerCase() + ".$1"
             );
         }
 
-        // 2. Oracle → PostgreSQL transformation
+        // 2. Oracle to PostgreSQL transformation
         if (transformer != null) {
             result = transformer.transform(result);
         }
@@ -1233,6 +1268,7 @@ public class MigrationWorker extends SwingWorker<Void, String> {
         }
         return filtered;
     }
+
 
     // ─────────────────────────────────────────────────────────────────────────
     // ERROR DETECTION HELPERS
@@ -1295,12 +1331,13 @@ public class MigrationWorker extends SwingWorker<Void, String> {
             ui.appendLog("\n=== HOÀN TẤT ===");
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-            ui.appendLog("\n=== THẤT BẠI: Tiến trình bị gián đoạn ===");
+            ui.appendLog("\n=== THẤT BẠI: Tiến trình bềEgián đoạn ===");
         } catch (ExecutionException e) {
-            ui.appendLog("\n=== THẤT BẠI: Quá trình bị gián đoạn ===");
+            ui.appendLog("\n=== THẤT BẠI: Quá trình bềEgián đoạn ===");
         } finally {
             // MềEkhóa lại nút Start Migration khi xong việc
             ui.enableStartButton(true);
         }
     }
 }
+

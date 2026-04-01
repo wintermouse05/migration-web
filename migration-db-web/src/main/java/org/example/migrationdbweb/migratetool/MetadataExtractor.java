@@ -19,6 +19,16 @@ public class MetadataExtractor {
     public List<String> getTableNames(Connection conn, String schema) throws SQLException {
         List<String> tableNames = new ArrayList<>();
         DatabaseMetaData metaData = conn.getMetaData();
+
+        if (schema == null || schema.isBlank()) {
+            System.err.println(
+                    "WARNING: schema is null/blank in getTableNames(). " +
+                    "This will return ALL tables from ALL schemas, " +
+                    "including system tables. " +
+                    "Caller should provide a valid schema name."
+            );
+        }
+
         try (ResultSet rs = metaData.getTables(null, schema, "%", new String[]{"TABLE"})) {
             while (rs.next()) {
                 tableNames.add(rs.getString("TABLE_NAME"));
@@ -500,6 +510,8 @@ public class MetadataExtractor {
             Connection conn, String schema, String indexName
     ) throws SQLException {
         // PostgreSQL: lấy index definition từ pg_indexes và phân tích
+        // FIX: pg_index.indrelid là OID FK tới pg_class, KHÔNG phải text.
+        // JOIN đúng: pg_class.relname = pg_indexes.tablename, rồi dùng pg_index.indrelid = pg_class.oid
         String sql = """
             SELECT
                 i.indexname,
@@ -508,8 +520,9 @@ public class MetadataExtractor {
                 x.indisunique,
                 x.indisprimary
             FROM pg_indexes i
-            JOIN pg_index x ON i.indexname = x.indexname AND i.schemaname = x.indrelid::regnamespace::text
-            JOIN pg_namespace n ON n.nspname = i.schemaname
+            JOIN pg_class c ON c.relname = i.tablename
+            JOIN pg_namespace n ON n.nspname = i.schemaname AND n.oid = c.relnamespace
+            JOIN pg_index x ON x.indrelid = c.oid AND x.indexname = i.indexname
             WHERE i.schemaname = ? AND i.indexname = ?
             """;
         try (PreparedStatement ps = conn.prepareStatement(sql)) {
@@ -1102,6 +1115,7 @@ public class MetadataExtractor {
         }
         if (objectType == null) return null;
 
+        // Lấy body từ USER_SOURCE
         StringBuilder bodyBuilder = new StringBuilder();
         String sourceSql = "SELECT TEXT FROM USER_SOURCE WHERE NAME = UPPER(?) AND TYPE = ? ORDER BY LINE";
         try (PreparedStatement ps = conn.prepareStatement(sourceSql)) {
@@ -1113,6 +1127,9 @@ public class MetadataExtractor {
                 }
             }
         }
+
+        // Lấy arguments từ USER_ARGUMENTS
+        List<FunctionDefinition.FunctionArgument> arguments = extractOracleFunctionArguments(conn, functionName);
 
         FunctionDefinition.FunctionType fType =
                 "FUNCTION".equalsIgnoreCase(objectType)
@@ -1127,7 +1144,58 @@ public class MetadataExtractor {
                 .language("PL/SQL")
                 .functionBody(bodyBuilder.toString())
                 .sourceSchema(schema)
+                .arguments(arguments)
                 .build();
+    }
+
+    /**
+     * Trích xuất danh sách tham số của một function/procedure Oracle từ USER_ARGUMENTS.
+     */
+    private List<FunctionDefinition.FunctionArgument> extractOracleFunctionArguments(
+            Connection conn, String functionName
+    ) throws SQLException {
+        List<FunctionDefinition.FunctionArgument> args = new ArrayList<>();
+        String sql = """
+            SELECT
+                ARGUMENT_NAME,
+                DATA_TYPE,
+                IN_OUT,
+                DATA_LENGTH,
+                DATA_PRECISION,
+                DATA_SCALE,
+                DEFAULTED,
+                SEQUENCE
+            FROM USER_ARGUMENTS
+            WHERE OBJECT_NAME = UPPER(?)
+            ORDER BY SEQUENCE
+            """;
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setString(1, functionName);
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    String argName = rs.getString("ARGUMENT_NAME");
+                    String dataType = rs.getString("DATA_TYPE");
+                    String inOut = rs.getString("IN_OUT");
+
+                    FunctionDefinition.FunctionArgument.ArgumentMode mode;
+                    if ("OUT".equalsIgnoreCase(inOut)) {
+                        mode = FunctionDefinition.FunctionArgument.ArgumentMode.OUT;
+                    } else if ("IN OUT".equalsIgnoreCase(inOut)) {
+                        mode = FunctionDefinition.FunctionArgument.ArgumentMode.INOUT;
+                    } else {
+                        mode = FunctionDefinition.FunctionArgument.ArgumentMode.IN;
+                    }
+
+                    FunctionDefinition.FunctionArgument arg = FunctionDefinition.FunctionArgument.builder()
+                            .name(argName)
+                            .dataType(dataType)
+                            .mode(mode)
+                            .build();
+                    args.add(arg);
+                }
+            }
+        }
+        return args;
     }
 
     // ─────────────────────────────────────────────────────────────
@@ -1251,9 +1319,10 @@ public class MetadataExtractor {
             }
         }
 
-        // Fallback: tìm " AS " lần cuối trước SELECT đầu tiên (an toàn hơn)
+        // Fallback: tìm " AS " an toàn — bỏ qua " AS " nằm trong string literals.
+        // Ví dụ: WHERE col = 'SCOTT AS SMITH' không phải là " AS " của CREATE VIEW.
         if (asIdx < 0) {
-            asIdx = selectClause.toUpperCase(Locale.ROOT).lastIndexOf(" AS ");
+            asIdx = findAsOutsideStringLiterals(selectClause);
         }
 
         if (asIdx >= 0) {
@@ -1261,6 +1330,47 @@ public class MetadataExtractor {
         }
 
         return new ParseOracleViewResult(selectClause, checkOption);
+    }
+
+    /**
+     * Tìm vị trí cuối cùng của " AS " nằm NGOÀI string literals (dấu nháy đơn).
+     *
+     * Ví dụ:
+     *   "SELECT * FROM T WHERE name = 'SCOTT AS SMITH'" → tìm đúng " AS " của VIEW, bỏ qua trong string.
+     *
+     * @param text chuỗi cần tìm (ví dụ: "CREATE VIEW V1 AS SELECT ...")
+     * @return vị trí index của " AS " hợp lệ, hoặc -1 nếu không tìm thấy
+     */
+    private static int findAsOutsideStringLiterals(String text) {
+        boolean inString = false;
+        int lastFound = -1;
+        String upper = text.toUpperCase(Locale.ROOT);
+
+        for (int i = 0; i <= upper.length() - 4; i++) {
+            char c = text.charAt(i);
+
+            // Toggle string literal state
+            if (c == '\'') {
+                // Xử lý escape: '' trong SQL = literal single quote
+                if (inString && i + 1 < text.length() && text.charAt(i + 1) == '\'') {
+                    i++; // skip both single quotes (escaped)
+                    continue;
+                }
+                inString = !inString;
+                continue;
+            }
+
+            // Bỏ qua khi đang ở trong string literal
+            if (inString) continue;
+
+            // Kiểm tra " AS " (case-insensitive)
+            if (upper.charAt(i) == 'A' && upper.charAt(i + 1) == 'S' && upper.charAt(i + 2) == ' '
+                    && (i == 0 || !Character.isLetterOrDigit(text.charAt(i - 1)))
+                    && (i + 3 >= text.length() || !Character.isLetterOrDigit(text.charAt(i + 3)))) {
+                lastFound = i;
+            }
+        }
+        return lastFound;
     }
 
     /**

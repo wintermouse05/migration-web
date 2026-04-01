@@ -140,8 +140,12 @@ public class DataTransferService {
              PreparedStatement targetPstmt = targetConn.prepareStatement(insertSql);
              PreparedStatement existsByPkStmt = existsByPkSql == null ? null : targetConn.prepareStatement(existsByPkSql)) {
 
-            // Cấu hình Fetch Size: SềElượng row tải vềERAM mỗi lần (Tránh OOM)
-            sourceStmt.setFetchSize(safeBatchSize);
+            // Cấu hình Fetch Size: Số lượng row tải về RAM mỗi lần (Tránh OOM).
+            // Fetch Size NHỎ HƠN batch size — fetch về ít rows để giảm memory Oracle server,
+            // trong khi batch INSERT vẫn giữ batchSize lớn để tối ưu throughput.
+            // Oracle JDBC mặc định fetchSize = 10, giá trị hợp lý: 100–500.
+            int fetchSize = Math.min(500, Math.max(100, safeBatchSize / 10));
+            sourceStmt.setFetchSize(fetchSize);
 
             try (ResultSet rs = sourceStmt.executeQuery(selectSql)) {
                 int totalTransferred = safeStartOffset;
@@ -244,6 +248,15 @@ public class DataTransferService {
                 targetPstmt.clearBatch();
                 return;
             } catch (SQLException e) {
+                // ⚠️ QUAN TRỌNG: Phải clearBatch() TRƯỚC KHI rollback và retry.
+                // Nếu không clear → JDBC driver giữ nguyên batch state đã fail,
+                // retry thêm batch() mới sẽ bị duplicate rows.
+                try {
+                    targetPstmt.clearBatch();
+                } catch (SQLException ignored) {
+                    // clearBatch() có thể throw nếu driver ở trạng thái không hợp lệ
+                    // Tạo statement mới trong retry loop để đảm bảo clean state
+                }
                 targetConn.rollback();
                 if (!isRetryableException(e) || attempt == attempts) {
                     throw new SQLException(

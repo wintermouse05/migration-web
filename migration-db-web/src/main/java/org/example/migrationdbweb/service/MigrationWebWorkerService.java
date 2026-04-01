@@ -174,7 +174,7 @@ public class MigrationWebWorkerService {
                         }
 
                         broadcastStatus(
-                                60 + (int) ((i * 25.0f) / tableDefinitions.size()),
+                                60 + (int) (((i + 1) * 25.0f) / tableDefinitions.size()),
                                 "RUNNING",
                                 "Dang migrate du lieu bang " + table.getTableName() + "...",
                                 true
@@ -436,7 +436,7 @@ public class MigrationWebWorkerService {
         String sqlState = e.getSQLState();
         String message = e.getMessage() == null ? "" : e.getMessage().toLowerCase(Locale.ROOT);
         return "42710".equals(sqlState)
-                || message.contains("constraint") && message.contains("already exists")
+                || (message.contains("constraint") && message.contains("already exists"))
                 || message.contains("ora-02275");
     }
 
@@ -639,24 +639,44 @@ public class MigrationWebWorkerService {
 
         String result = clause;
 
-        // 1. Schema replacement — dùng regex an toàn (tránh thay trong string literals)
+        // 1. Schema replacement — an toàn cho Oracle → PostgreSQL
+        //    PostgreSQL dùng lowercase identifiers, Oracle dùng UPPERCASE (quoted hoặc không)
         if (sourceSchema != null && targetSchema != null
                 && !sourceSchema.equalsIgnoreCase(targetSchema)) {
 
-            // a) Unquoted identifier: SCOTT.DEPT → PUBLIC.DEPT
-            //    Dùng negative lookbehind để đảm bảo không match trong string literals
-            //    (?<![a-zA-Z0-9_"']) = không có alphanumeric/quote/underscore đứng trước
+            // a) Quoted UPPERCASE: "SCOTT"."PRODUCTS" → "public"."products"
+            //    Oracle giữ UPPERCASE trong dấu ngoặc kép. PostgreSQL dùng lowercase.
             result = result.replaceAll(
-                    "(?<![a-zA-Z0-9_\\'\"])"                                    // không có identifier/quote trước
+                    "\"\\s*" + Pattern.quote(sourceSchema) + "\\s*\"\\s*\\.\"",
+                    "\"" + targetSchema.toLowerCase() + "\".\""
+            );
+            // Giữ nguyên quoted schema phía sau dấu . : "SCOTT"."PRODUCTS" → "public"."products"
+            // Pattern trên chỉ match "schema." → thay bằng "target."
+            // Tên bảng (identifier) sau dấu . giữ nguyên — sẽ lowercase ở bước tiếp theo
+
+            // b) Unquoted identifier: SCOTT.PRODUCTS → public.products
+            //    Oracle UPPERCASE không quoted, PostgreSQL lowercase
+            result = result.replaceAll(
+                    "(?<![a-zA-Z0-9_'\"])"                                    // không có identifier/quote trước
                             + Pattern.quote(sourceSchema) + "\\.([a-zA-Z_][a-zA-Z0-9_]*)",  // schema. identifier
-                    targetSchema + ".$1"
+                    targetSchema.toLowerCase() + ".$1"
             );
 
-            // b) Quoted identifier: "SCOTT"."DEPT" hoặc "SCOTT".DEPT → "PUBLIC"."DEPT"
-            //    Escape tên schema trong dấu ngoặc kép
+            // c) Identifier sau "schema." cần UPPERCASE → lowercase
+            //    "public"."PRODUCTS" → "public"."products"
+            //    PostgreSQL tất cả lowercase, kể cả quoted
             result = result.replaceAll(
-                    "\"\\s*" + Pattern.quote(sourceSchema) + "\\s*\"\\s*\\.",
-                    "\"" + targetSchema + "\"."
+                    "\"\\s*" + Pattern.quote(targetSchema.toLowerCase()) + "\\s*\"\\s*\\.\\s*\"([^\"]+)\"\\s*",
+                    "\"" + targetSchema.toLowerCase() + "\".\"$1\""
+            );
+
+            // d) Lowercase source schema trong view body (Oracle lowercase schema)
+            //    Lỗi: "scott.products" không được replace vì sourceSchema = "SCOTT" (UPPERCASE)
+            //    View từ Oracle có thể dùng lowercase "scott.products"
+            //    Replace: scott.products → public.products (case-insensitive)
+            result = result.replaceAll(
+                    "(?i)" + Pattern.quote(sourceSchema.toLowerCase()) + "\\.([a-zA-Z_][a-zA-Z0-9_]*)",
+                    targetSchema.toLowerCase() + ".$1"
             );
         }
 
@@ -697,10 +717,9 @@ public class MigrationWebWorkerService {
     private static boolean isViewAlreadyExistsError(SQLException e) {
         String sqlState = e.getSQLState();
         String message = e.getMessage() == null ? "" : e.getMessage().toLowerCase(Locale.ROOT);
-        return "42P06".equals(sqlState)               // Postgres view exists
-                || message.contains("already exists")
-                && message.contains("view")
-                || message.contains("ora-00955");    // Oracle name is already used by an existing object
+        return "42P06".equals(sqlState)
+                || (message.contains("already exists") && message.contains("view"))
+                || message.contains("ora-00955");
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -766,12 +785,12 @@ public class MigrationWebWorkerService {
         }
 
         for (int attempt = 1; attempt <= attempts; attempt++) {
-            // Tạo DataTransferService mới mỗi attempt để đảm bảo connection sạch
+            // Tạo DataTransferService mới mỗi attempt để đảm bảo connection sạch.
+            // Connection được cung cấp từ outer try-with-resources (sourceConn / targetConn),
+            // KHÔNG đóng ở đây — chỉ reuse.
             DataTransferService transferService = new DataTransferService(sqlGenerator, retryPolicy);
 
-            try (Connection srcConn = sourceConn;
-                 Connection tgtConn = targetConn) {
-
+            try {
                 if (attempt > 1) {
                     broadcastStatus(
                             60 + (int) ((tableIndex * 25.0f) / totalTables),
@@ -783,8 +802,8 @@ public class MigrationWebWorkerService {
 
                 final int currentStartOffset = startOffset;
                 DataTransferService.TransferResult result = transferService.transferTableData(
-                        srcConn,
-                        tgtConn,
+                        sourceConn,
+                        targetConn,
                         table,
                         batchSize,
                         limitRows,
@@ -1057,7 +1076,9 @@ public class MigrationWebWorkerService {
                             skipCount++;
                         } else {
                             errorCount++;
-                            System.err.println("Loi tao function " + fnName + ": " + e.getMessage());
+                            String fnError = "Loi tao function/procedure " + fnName + ": " + e.getMessage();
+                            System.err.println(fnError);
+                            broadcastStatus(92, "RUNNING", fnError, true);
                         }
                     }
                 }
@@ -1147,8 +1168,7 @@ public class MigrationWebWorkerService {
         String sqlState = e.getSQLState();
         String message = e.getMessage() == null ? "" : e.getMessage().toLowerCase(Locale.ROOT);
         return "42P06".equals(sqlState)
-                || message.contains("already exists")
-                && message.contains("trigger")
+                || (message.contains("already exists") && message.contains("trigger"))
                 || message.contains("ora-00955");
     }
 }

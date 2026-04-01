@@ -839,7 +839,7 @@ public abstract class DirectionalMigration {
                         table,
                         batchSize,
                         null,
-                        enableResumeByPk,
+                        false,  // copyNewOnly: CLI does not support this option
                         startOffset,
                         (tableName, justTransferred, totalTransferred, totalSkipped) -> {
                             if (checkpointStore != null) {
@@ -1059,7 +1059,7 @@ public abstract class DirectionalMigration {
         String sqlState = e.getSQLState();
         String message = e.getMessage() == null ? "" : e.getMessage().toLowerCase(Locale.ROOT);
         return "42710".equals(sqlState)
-                || message.contains("constraint") && message.contains("already exists")
+                || (message.contains("constraint") && message.contains("already exists"))
                 || message.contains("ora-02275");
     }
 

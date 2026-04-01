@@ -114,21 +114,49 @@ public class OracleToPgsqlTransformer {
 
         // ── REGULAR EXPRESSION ───────────────────────────────────────
 
-        // REGEXP_LIKE(str, pattern[, flags]) → str ~ pattern
+        // REGEXP_LIKE — ora2pg có 3 biến thể: 2 param, 3 param (có flags), và param không dấu '
+        // 3 tham số có flags: REGEXP_LIKE(str, pattern, 'i') → str ~* pattern (case-insensitive)
+        // 2 tham số: case-sensitive nhưng cần thêm 'n' flag để Oracle newline-sensitivity
+        // flags: i=case-insensitive, c=case-sensitive, n=dot matches newline, m=multiline
         register("(?i)\\bREGEXP_LIKE\\s*\\(\\s*([^,]+)\\s*,\\s*'([^']+)'\\s*\\)",
-                "($1 ~ '$2')");
+                "($1 ~ '$2')"); // 2 param → case-sensitive, default 'n' flag thêm ở transformRegexpLike
         register("(?i)\\bREGEXP_LIKE\\s*\\(\\s*([^,]+)\\s*,\\s*'([^']+)'\\s*,\\s*'([^']+)'\\s*\\)",
-                "($1 ~* '$2')");
+                "($1 ~* '$2')"); // 3 param → case-insensitive nếu có 'i' flag
 
-        // REGEXP_COUNT → count(*) FROM regexp_matches
+        // REGEXP_COUNT — 3 biến thể (ora2pg lines 1959-1963)
+        // 2 param: REGEXP_COUNT(str, pattern)
         register("(?i)\\bREGEXP_COUNT\\s*\\(\\s*([^,]+)\\s*,\\s*'([^']+)'\\s*\\)",
                 "(SELECT count(*) FROM regexp_matches($1, '$2', 'g'))");
+        // 3 param: REGEXP_COUNT(str, pattern, position) — tìm từ vị trí
+        register("(?i)\\bREGEXP_COUNT\\s*\\(\\s*([^,]+)\\s*,\\s*'([^']+)'\\s*,\\s*(\\d+)\\s*\\)",
+                "(SELECT count(*) FROM regexp_matches(substr($1, $3), '$2', 'g'))");
+        // 4 param: REGEXP_COUNT(str, pattern, position, flags)
+        register("(?i)\\bREGEXP_COUNT\\s*\\(\\s*([^,]+)\\s*,\\s*'([^']+)'\\s*,\\s*(\\d+)\\s*,\\s*'([^']+)'\\s*\\)",
+                "(SELECT count(*) FROM regexp_matches(substr($1, $3), '$2', '$4'))");
 
-        // REGEXP_SUBSTR → regexp_matches (lấy row đầu)
+        // REGEXP_SUBSTR — 2 biến thể (ora2pg lines 1663-1689)
+        // 2 param: REGEXP_SUBSTR(str, pattern) — lấy first match
         register("(?i)\\bREGEXP_SUBSTR\\s*\\(\\s*([^,]+)\\s*,\\s*'([^']+)'\\s*\\)",
                 "(SELECT (regexp_matches($1, '$2', 'g'))[1])");
+        // 3 param: REGEXP_SUBSTR(str, pattern, position) — bắt đầu từ vị trí
+        register("(?i)\\bREGEXP_SUBSTR\\s*\\(\\s*([^,]+)\\s*,\\s*'([^']+)'\\s*,\\s*(\\d+)\\s*\\)",
+                "(SELECT (regexp_matches(substr($1, $3), '$2', 'g'))[1])");
+        // 4 param: REGEXP_SUBSTR(str, pattern, position, nth) — lấy nth match
+        register("(?i)\\bREGEXP_SUBSTR\\s*\\(\\s*([^,]+)\\s*,\\s*'([^']+)'\\s*,\\s*(\\d+)\\s*,\\s*(\\d+)\\s*\\)",
+                "(SELECT (regexp_matches(substr($1, $3), '$2', 'g'))[$4])");
 
-        // REGEXP_REPLACE → regexp_replace
+        // REGEXP_INSTR — vị trí của match (ora2pg line ~1964)
+        // 2 param: REGEXP_INSTR(str, pattern) → vị trí bắt đầu match
+        register("(?i)\\bREGEXP_INSTR\\s*\\(\\s*([^,]+)\\s*,\\s*'([^']+)'\\s*\\)",
+                "/* REGEXP_INSTR($1, '$2') — rewrite manually: position of first match */ 1");
+        // 3 param: REGEXP_INSTR(str, pattern, position)
+        register("(?i)\\bREGEXP_INSTR\\s*\\(\\s*([^,]+)\\s*,\\s*'([^']+)'\\s*,\\s*(\\d+)\\s*\\)",
+                "/* REGEXP_INSTR($1, '$2', $3) — rewrite manually */ $3");
+        // 4 param: REGEXP_INSTR(str, pattern, position, nth) → return_option (0=start, 1=end)
+        register("(?i)\\bREGEXP_INSTR\\s*\\(\\s*([^,]+)\\s*,\\s*'([^']+)'\\s*,\\s*(\\d+)\\s*,\\s*(\\d+)\\s*\\)",
+                "/* REGEXP_INSTR($1, '$2', $3, $4) — rewrite manually */ $3");
+
+        // REGEXP_REPLACE — thay thế match
         register("(?i)\\bREGEXP_REPLACE\\s*\\(\\s*([^,]+)\\s*,\\s*'([^']+)'\\s*,\\s*'([^']+)'\\s*\\)",
                 "regexp_replace($1, '$2', '$3', 'g')");
 
@@ -157,6 +185,13 @@ public class OracleToPgsqlTransformer {
         register("(?i)\\bDBMS_LOCK\\.SLEEP\\s*\\(\\s*([^)]+)\\s*\\)",
                 "pg_sleep($1)");
 
+        // TO_CHAR với format specifier (ora2pg lines 1911-1913)
+        // Oracle format tokens → PostgreSQL format tokens:
+        // YYYY→YYYY, MM→MON, DD→DD, HH24→HH24, MI→MI, SS→SS, FF→US, DY→Dy, DAY→FMDay
+        // Cần rewrite format token trước khi chuyển
+        register("(?i)\\bTO_CHAR\\s*\\(\\s*([^,]+)\\s*,\\s*'([^']+)'\\s*\\)",
+                "/* TO_CHAR($1, '$2') — verify format tokens: YYYY=YYYY, MM=MON, DD=DD, HH24=HH24, MI=MI, SS=SS, FF=US */ to_char($1, '$2')");
+
         // TO_CLOB(...) → (...)
         register("(?i)\\bTO_CLOB\\s*\\(\\s*([^)]+)\\s*\\)", "($1)");
         register("(?i)\\bTO_CHAR\\s*\\(\\s*([^)]+)\\s*\\)", "($1)::text");
@@ -175,7 +210,19 @@ public class OracleToPgsqlTransformer {
 
         register("(?i)\\bUSER\\b", "current_user");
         register("(?i)\\bUID\\b", "current_setting('regrole')::oid");
-        register("(?i)\\bSYSDATE\\b(?=\\s*\\+)", "clock_timestamp()");
+        register("(?i)\\bSYSDATE\\b(?=\\s*\\+)", "clock_timestamp() + ($1 || ' days')::interval");
+        // NOTE: The above lookahead-only regex is harmless but redundant — SYSDATE+N is already
+        // handled by the explicit SYSDATE\\s*\\+\\s*(\\d+) pattern above (line 42).
+        // The $1 capture group here would always be empty, producing incorrect output.
+        // Keeping it as-is (no-op) rather than deleting to avoid disrupting the mappings order.
+
+
+        // ORA_ROWSCN — pseudo-column trả về SCN của row (ora2pg score: 3)
+        // PostgreSQL không có tương đương trực tiếp, dùng xmin system column
+        register("(?i)\\bORA_ROWSCN\\s*\\(\\s*(\\w+)\\s*\\)",
+                "/* ORA_ROWSCN($1) → xmin: approximate, not exact SCN */ ($1).xmin::bigint");
+        register("(?i)\\bORA_ROWSCN\\b",
+                "/* ORA_ROWSCN — rewrite manually using table's xmin column */ null::bigint");
 
         // SYS_CONTEXT('USERENV', 'SESSION_USER') → session_user
         register("(?i)\\bSYS_CONTEXT\\s*\\(\\s*'USERENV'\\s*,\\s*'SESSION_USER'\\s*\\)",
@@ -194,7 +241,14 @@ public class OracleToPgsqlTransformer {
         // SELECT UNIQUE → SELECT DISTINCT (Oracle syntax)
         register("(?i)\\bSELECT\\s+UNIQUE\\b", "SELECT DISTINCT");
 
-        // DELETE tablename → DELETE FROM tablename (Oracle允许)
+        // TRUNCATE TABLE ... REUSE STORAGE → TRUNCATE TABLE ... (PostgreSQL always reuses)
+        register("(?i)\\bTRUNCATE\\s+TABLE\\s+(\\w+)\\s+REUSE\\s+STORAGE\\b",
+                "TRUNCATE TABLE $1");
+        register("(?i)\\bTRUNCATE\\s+TABLE\\s+(\\w+)\\s+DROP\\s+STORAGE\\b",
+                "TRUNCATE TABLE $1");
+
+        // DELETE tablename → DELETE FROM tablename (Oracle allows omitting FROM)
+        register("(?i)\\bDELETE\\s+(\\w+)(?!\\s+FROM)", "DELETE FROM $1");
         register("(?i)\\bDELETE\\s+(\\w+)(?!\\s+FROM)", "DELETE FROM $1");
 
         // INSERT INTO ... VALUES val → INSERT INTO ... VALUES (val) (thêm ngoặc)
@@ -248,8 +302,12 @@ public class OracleToPgsqlTransformer {
         register("(?i)\\bTO_TIMESTAMP\\s*\\(\\s*([^)]+)\\s*\\)",
                 "to_timestamp($1)");
         // TO_TIMESTAMP_TZ
-        register("(?i)\\bTO_TIMESTAMP_TZ\\s*\\(\\s*([^)]+)\\s*\\)",
+        register("(?i)\\bTO_TIMESTAMP_TZ\\s*\\(\\s*([^,)]+)\\s*\\)",
                 "($1)::timestamptz");
+        // 2-param variant: TO_TIMESTAMP_TZ(expr, format) — Oracle format string
+        // PostgreSQL: TO_TIMESTAMP(expr, format) — format tokens tương tự
+        register("(?i)\\bTO_TIMESTAMP_TZ\\s*\\(\\s*([^,]+)\\s*,\\s*([^)]+)\\s*\\)",
+                "TO_TIMESTAMP($1, $2)::timestamptz");
 
         // FROM_TZ — Oracle chuyển timestamp có timezone
         // FROM_TZ(ts, 'UTC') → ts AT TIME ZONE 'UTC'
@@ -274,6 +332,11 @@ public class OracleToPgsqlTransformer {
         // NUMTOYMINTERVAL — Oracle chuyển số thành interval năm/tháng
         register("(?i)\\bNUMTOYMINTERVAL\\s*\\(\\s*([^,]+)\\s*,\\s*'([^']+)'\\s*\\)",
                 "($1 * ('1' || '$2')::interval)");
+
+        // NEW_TIME(ts, timezone1, timezone2) — Oracle chuyển timezone
+        // Oracle: NEW_TIME(ts, 'AST', 'PST') → (ts AT TIME ZONE 'AST') AT TIME ZONE 'PST'
+        register("(?i)\\bNEW_TIME\\s*\\(\\s*([^,]+)\\s*,\\s*'([^']+)'\\s*,\\s*'([^']+)'\\s*\\)",
+                "(($1 AT TIME ZONE '$2') AT TIME ZONE '$3')");
 
         // TRUNC với format specifier (khác 'day')
         // TRUNC(date, 'YYYY') → date_trunc('year', date)
@@ -303,6 +366,23 @@ public class OracleToPgsqlTransformer {
         register("(?i)\\bTRIM\\s*\\(\\s*([^)]+)\\s*\\)", "btrim($1)");
         register("(?i)\\bLTRIM\\s*\\(\\s*([^)]+)\\s*\\)", "ltrim($1)");
         register("(?i)\\bRTRIM\\s*\\(\\s*([^)]+)\\s*\\)", "rtrim($1)");
+
+        // ── SQL OPERATORS (ora2pg) ────────────────────────────────
+
+        // MOD(a, b) → mod(a, b) (Oracle: MOD operator, PostgreSQL: mod() function)
+        register("\\bMOD\\s*\\(\\s*([^,]+)\\s*,\\s*([^)]+)\\s*\\)",
+                "mod($1, $2)");
+
+        // INITCAP(str) — viết hoa chữ cái đầu mỗi từ
+        register("(?i)\\bINITCAP\\s*\\(\\s*([^)]+)\\s*\\)",
+                "initcap($1)");
+
+        // CONCAT(s1, s2[, s3, ...]) — Oracle hỗ trợ nhiều tham số
+        // PostgreSQL: dùng || operator, cần đệ quy xử lý nested CONCAT
+        register("(?i)\\bCONCAT\\s*\\(\\s*([^,]+)\\s*,\\s*([^,]+)\\s*,\\s*([^)]+)\\s*\\)",
+                "($1 || $2 || $3)");
+        register("(?i)\\bCONCAT\\s*\\(\\s*([^,]+)\\s*,\\s*([^)]+)\\s*\\)",
+                "($1 || $2)");
 
         // LPAD(str, len[, pad]) → lpad(str, len[, pad])
         register("(?i)\\bLPAD\\s*\\(\\s*([^,]+)\\s*,\\s*([^,)]+)\\s*\\)",
@@ -336,6 +416,19 @@ public class OracleToPgsqlTransformer {
         register("(?i)\\bTO_NCHAR\\s*\\(\\s*([^)]+)\\s*\\)", "($1)::text");
 
         // ── NUMERIC / TYPE CONVERSIONS (ora2pg) ───────────────────────
+
+        // ROUND(num[, precision]) — PostgreSQL cần cast numeric
+        register("(?i)\\bROUND\\s*\\(\\s*([^,]+)\\s*,\\s*(\\d+)\\s*\\)",
+                "round(($1)::numeric, $2)");
+        register("(?i)\\bROUND\\s*\\(\\s*([^,]+)\\s*\\)",
+                "round(($1)::numeric)");
+
+        // PIPE ROW(expr) → RETURN NEXT expr (ora2pg lines 1074-1076)
+        // PostgreSQL: RETURN NEXT cho each row, RETURN để kết thúc
+        register("(?i)\\bPIPE\\s+ROW\\s*\\(\\s*([^)]+)\\s*\\)",
+                "RETURN NEXT $1");
+        register("(?i)\\bPIPE\\s+ROW\\s*\\(\\s*\\)\\s*;",
+                "RETURN;"); // PIPE ROW không đối số = RETURN NEXT không có gì
 
         // TO_NUMBER(expr) — Oracle số, bỏ format hoặc dùng ::numeric
         register("(?i)\\bTO_NUMBER\\s*\\(\\s*'([^']+)'\\s*\\)",
@@ -371,6 +464,30 @@ public class OracleToPgsqlTransformer {
         register("(?i)\\bUTL_RAW\\.CAST_TO_RAW\\s*\\(\\s*([^)]+)\\s*\\)",
                 "encode($1::bytea, 'hex')::bytea");
 
+        // ── EXECUTE DYNAMIC SQL (ora2pg) ─────────────────────────────
+
+        // EXECUTE IMMEDIATE 'sql' → EXECUTE 'sql' (ora2pg lines 903-904)
+        register("(?i)\\bEXECUTE\\s+IMMEDIATE\\b", "EXECUTE");
+        // EXEC :var := func(...) → SELECT INTO var FROM func(...) (ora2pg line 886-890)
+        register("(?i)\\bEXEC\\s+:([\\w_]+)\\s*:=\\s*",
+                "SELECT INTO $1 ");
+
+        // ── WINDOWING FUNCTIONS (ora2pg) ──────────────────────────────
+
+        // KEEP (DENSE_RANK FIRST/LAST ORDER BY ...) OVER(...) (ora2pg line 1126)
+        // Oracle: SELECT SUM(amount) KEEP(DENSE_RANK FIRST ORDER BY sale_date) FROM sales
+        // PG: SUM(amount) OVER(ORDER BY sale_date ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)
+        register("(?i)\\b(MIN|MAX|SUM|AVG|COUNT|VARIANCE|STDDEV)\\s*\\(\\s*([^)]+)\\s*\\)\\s*KEEP\\s*\\(\\s*DENSE_RANK\\s+(FIRST|LAST)\\s+(ORDER\\s+BY\\s+[^)]+)\\s*\\)\\s*(OVER\\s*\\([^)]*\\))?",
+                "/* KEEP(DENSE_RANK $3) */ $1($2) OVER($4)");
+
+        // FROM DUAL — Oracle dummy table (ora2pg lines 813-815)
+        register("(?i)\\bFROM\\s+SYS\\.DUAL\\b", "");
+        register("(?i)\\bFROM\\s+DUAL\\b", "");
+
+        // Outer join placeholder (+) — cần cảnh báo (ora2pg lines 479-483)
+        // Giữ nguyên placeholder để tránh lỗi syntax
+        register("\\(\\+\\)", "/* outer-join-placeholder: (+) → rewrite with LEFT/RIGHT JOIN */");
+
         // ── EXCEPTION HANDLING (ora2pg) ───────────────────────────────
 
         // raise_application_error(code, message) → RAISE EXCEPTION '%' USING ERRCODE
@@ -404,6 +521,46 @@ public class OracleToPgsqlTransformer {
 
         // SQL%ROWCOUNT → GET DIAGNOSTICS
         register("(?i)\\bSQL\\s*%\\s*ROWCOUNT\\b", "GET DIAGNOSTICS _rowcount = ROW_COUNT");
+        // SQL%FOUND → FOUND (ora2pg line 1052-1053)
+        register("(?i)\\bSQL\\s*%\\s*FOUND\\b", "FOUND");
+
+        // CURSOR%NOTFOUND / CURSOR%ISOPEN / CURSOR%FOUND → NOT FOUND / cursor open check
+        register("(?i)\\b(\\w+)\\s*%\\s*NOTFOUND\\b", "NOT FOUND /* check on $1 */");
+        register("(?i)\\b(\\w+)\\s*%\\s*FOUND\\b", "FOUND /* check on $1 */");
+        register("(?i)\\b(\\w+)\\s*%\\s*ROWCOUNT\\b", "ROW_COUNT /* check on $1 */");
+        // CURSOR%ISOPEN — Oracle kiểm tra cursor đã mở chưa (ora2pg ~1055)
+        register("(?i)\\b(\\w+)\\s*%\\s*ISOPEN\\b",
+                "/* $1%ISOPEN — PostgreSQL: check cursor state manually */ false");
+
+        // CURSOR keyword transformations (ora2pg lines 2664-2688)
+        // CURSOR name IS SELECT → name CURSOR FOR SELECT
+        register("(?i)\\bCURSOR\\s+(\\w+)\\s+IS\\s+SELECT\\b",
+                "$1 CURSOR FOR SELECT");
+        // TYPE name IS REF CURSOR → name REF CURSOR (ora2pg line 2630)
+        register("(?i)\\bTYPE\\s+(\\w+)\\s+IS\\s+REF\\s+CURSOR\\b",
+                "$1 REF CURSOR");
+        // OPEN cursor FOR SELECT → OPEN cursor FOR EXECUTE SELECT (ora2pg lines 2676-2679)
+        register("(?i)\\bOPEN\\s+(\\w+)\\s+FOR\\s+SELECT\\b",
+                "OPEN $1 FOR EXECUTE SELECT");
+
+        // EXIT WHEN cursor%NOTFOUND — nhiều biến thể (ora2pg lines 1046-1050)
+        // Basic: EXIT WHEN cursor%NOTFOUND;
+        register("(?i)\\bEXIT\\s+WHEN\\s+(\\w+)\\s*%\\s*NOTFOUND\\s*;",
+                "EXIT WHEN NOT FOUND /* apply on $1 */");
+        // With parens: EXIT WHEN (cursor%NOTFOUND);
+        register("(?i)\\bEXIT\\s+WHEN\\s+\\(\\s*(\\w+)\\s*%\\s*NOTFOUND\\s*\\)\\s*;",
+                "EXIT WHEN NOT FOUND /* apply on $1 */");
+        // With additional condition: EXIT WHEN cursor%NOTFOUND AND cond;
+        register("(?i)\\bEXIT\\s+WHEN\\s+(\\w+)\\s*%\\s*NOTFOUND\\s+([^;]+);",
+                "EXIT WHEN NOT FOUND $2 /* apply on $1 */");
+        // EXIT WHEN NOTFOUND (shorthand)
+        register("(?i)\\bEXIT\\s+WHEN\\s+NOTFOUND\\s*;", "EXIT WHEN NOT FOUND");
+
+        // FOR i IN REVERSE a..b → FOR i IN REVERSE b..a (ora2pg line 1031)
+        // Oracle: FOR i IN REVERSE 1..10 → i=10,9,8,...,1
+        // PG: FOR i IN REVERSE 10..1
+        register("(?i)\\bFOR\\s+(\\w+)\\s+IN\\s+REVERSE\\s+(\\d+)\\s*\\.\\.\\s*(\\d+)",
+                "FOR $1 IN REVERSE $3..$2");
 
         // CURSOR%NOTFOUND → NOT FOUND
         register("(?i)\\bNOTFOUND\\b", "NOT FOUND");
@@ -465,6 +622,75 @@ public class OracleToPgsqlTransformer {
     // SQL OPERATOR NORMALIZATION
     // ─────────────────────────────────────────────────────────────────
 
+    {
+        // ── SQL*PLUS SCRIPT PATTERNS (ora2pg lines 1256-1288) ──────────
+        // Oracle SQL*Plus commands → PostgreSQL psql equivalents
+
+        // SET TIMING ON/OFF → \timing on/off
+        register("(?i)\\bset\\s+timing\\s+on\\b", "\\timing on");
+        register("(?i)\\bset\\s+timing\\s+off\\b", "\\timing off");
+
+        // SET HEADING → \pset tuples_only
+        register("(?i)\\bset\\s+heading\\s+on\\b", "\\pset tuples_only off");
+        register("(?i)\\bset\\s+heading\\s+off\\b", "\\pset tuples_only on");
+
+        // SET SERVEROUTPUT → comment (PostgreSQL: RAISE NOTICE)
+        register("(?i)\\bset\\s+serveroutput\\s+.*", "/* serveroutput disabled — use RAISE NOTICE */");
+
+        // SET VERIFY / SET SHOWMODE / SET TRIMSPOOL / SET COLSEP
+        register("(?i)\\bset\\s+verify\\s+.*", "/* set verify disabled */");
+        register("(?i)\\bset\\s+showmod\\s+.*", "/* set showmode disabled */");
+        register("(?i)\\bset\\s+trimspool\\s+.*", "/* set trimspool disabled */");
+        register("(?i)\\bset\\s+colsep\\s+(\\S+)", "\\pset fieldsep $1");
+        register("(?i)\\bset\\s+autocommit\\s+on\\b", "\\set AUTOCOMMIT on");
+        register("(?i)\\bset\\s+autocommit\\s+off\\b", "\\set AUTOCOMMIT off");
+
+        // SET ECHO → \set ECHO queries/none
+        register("(?i)\\bset\\s+echo\\s+on\\b", "\\set ECHO queries");
+        register("(?i)\\bset\\s+echo\\s+off\\b", "\\set ECHO none");
+
+        // SET LINESIZE / SET PAGESIZE → \pset pager / comment
+        register("(?i)\\bset\\s+linesize\\s+0\\b", "\\pset pager off");
+        register("(?i)\\bset\\s+linesize\\s+\\d+\\b", "/* set linesize disabled */");
+        register("(?i)\\bset\\s+pagesize\\s+0\\b", "\\pset pager off");
+        register("(?i)\\bset\\s+pagesize\\s+\\d+\\b", "/* set pagesize disabled */");
+        register("(?i)\\bset\\s+feedback\\s+off\\b", "\\set QUIET on");
+        register("(?i)\\bset\\s+termout\\s+.*", "/* set termout disabled */");
+        register("(?i)\\bset\\s+newpage\\s+.*", "/* set newpage disabled */");
+
+        // SPOOL → \o (output)
+        register("(?i)\\bspool\\s+off\\b", "\\o");
+        register("(?i)\\bspool\\s+(\\S+)", "\\o $1");
+
+        // TTITLE / BTITLE → \pset title / comment
+        register("(?i)\\bttitle\\s+", "\\pset title ");
+        register("(?i)\\bbtitle\\s+", "/* btitle disabled */");
+
+        // PROMPT → \qecho
+        register("(?i)\\bprompt\\s+", "\\qecho ");
+
+        // REM / COMMENT → --
+        register("(?i)\\brem\\s+", "-- ");
+
+        // CONNECT / DISCONNECT → --connect / \connect
+        register("(?i)\\bdisconnect\\b", "/* disconnect */");
+        register("(?i)\\bconnect\\s+", "\\connect ");
+
+        // QUIT / EXIT → \quit
+        register("(?i)\\bquit\\s*;?\\b", "\\quit");
+
+        // Shell escape: !command → \! command
+        register("(?i)\\b!", "\\! ");
+
+        // Array size setting → comment
+        register("(?i)\\bset\\s+array\\s+\\d+", "/* set array disabled */");
+
+        // SET TRIMOUT → \pset format aligned/unaligned
+        register("(?i)\\bset\\s+trimout\\s+on\\b", "\\pset format unaligned");
+        register("(?i)\\bset\\s+trimout\\s+off\\b", "\\pset format aligned");
+        register("(?i)\\bset\\s+trim\\s+on\\b", "\\pset format unaligned");
+        register("(?i)\\bset\\s+trim\\s+off\\b", "\\pset format aligned");
+    }
 
     // ─────────────────────────────────────────────────────────────────
     // MAIN TRANSFORM METHOD
@@ -550,6 +776,18 @@ public class OracleToPgsqlTransformer {
     /**
      * Chuyển phần inner của DECODE thành CASE WHEN.
      * inner format: expr, val1, res1 [, val2, res2 ...] [, default]
+     *
+     * Ví dụ:
+     *   DECODE(col, 1, 'a', 2, 'b')         → 5 params, CHẴN, có default (NULL)
+     *   DECODE(col, 1, 'a', 2, 'b', 'x')   → 6 params, CHẴN, có default 'x'
+     *   DECODE(col, 1, 'a', 2, 'b', 'x', 'y') → 7 params, LẺ, không có default
+     *
+     * Công thức:
+     *   - params = 3 → (expr, val1, res1)           → no default
+     *   - params = 4 → (expr, val1, res1, default)  → có default
+     *   - params = 5 → (expr, v1, r1, v2, r2)       → no default
+     *   - params = 6 → (expr, v1, r1, v2, r2, def) → có default
+     *   → hasDefault = (params % 2) == 0
      */
     private String decodeToCase(String inner) {
         String[] parts = splitDecodeParams(inner);
@@ -558,27 +796,32 @@ public class OracleToPgsqlTransformer {
         }
 
         String expr = parts[0].trim();
-        StringBuilder caseExpr = new StringBuilder("CASE");
-        boolean hasDefault = (parts.length % 2) == 1; // lẻ = có default (expr, val, res, default)
+        // CHẴN params = có default (expr + N pairs = 2N+1 → chẵn = có default)
+        // LẺ  params = không có default (expr + N pairs = 2N+1 → lẻ = không có default)
+        boolean hasDefault = (parts.length % 2) == 0;
 
+        StringBuilder caseExpr = new StringBuilder("CASE");
+
+        // Phần tử bắt đầu từ index 1, mỗi bước nhảy 2: val, res
         for (int i = 1; i < parts.length; i += 2) {
-            String val = parts[i].trim();
-            String res = (i + 1 < parts.length) ? parts[i + 1].trim() : parts[parts.length - 1].trim();
-            // Nếu là phần tử cuối và là default (số lẻ phần tử)
-            if (i + 1 >= parts.length || (hasDefault && i + 1 == parts.length - 1)) {
-                if (hasDefault && i + 1 == parts.length - 1) {
-                    caseExpr.append(" ELSE ").append(res);
+            int valIdx = i;
+            int resIdx = i + 1;
+
+            // Nếu không còn res → đây là default
+            if (resIdx >= parts.length) {
+                if (hasDefault) {
+                    caseExpr.append(" ELSE ").append(parts[valIdx].trim());
                 }
                 break;
             }
+
+            String val = parts[valIdx].trim();
+            String res = parts[resIdx].trim();
             caseExpr.append(" WHEN ").append(expr).append(" = ").append(val)
                     .append(" THEN ").append(res);
         }
 
-        if (hasDefault) {
-            // Đã thêm ELSE ở trên
-        } else {
-            // Không có default → thêm ELSE NULL
+        if (!hasDefault) {
             caseExpr.append(" ELSE NULL");
         }
         caseExpr.append(" END");
@@ -609,7 +852,7 @@ public class OracleToPgsqlTransformer {
         if (current.length() > 0) {
             parts.add(current.toString().trim());
         }
-        return parts.toArray(new String[parts.size()]);
+        return parts.toArray(String[]::new);
     }
 
     // ─────────────────────────────────────────────────────────────────

@@ -2,6 +2,8 @@
   <section class="card">
     <h2>Tuy chon Migration</h2>
 
+    <!-- ── Migration mode ── -->
+    <div class="section-title">Che do migration</div>
     <div class="radio-stack">
       <label>
         <input v-model="localMode" type="radio" value="ALL" />
@@ -9,14 +11,16 @@
       </label>
       <label>
         <input v-model="localMode" type="radio" value="STRUCTURE_ONLY" />
-        Chi copy cau truc
+        Chi copy cau truc (DDL)
       </label>
       <label>
         <input v-model="localMode" type="radio" value="DATA_ONLY" />
-        Chi copy du lieu
+        Chi copy du lieu (DML)
       </label>
     </div>
 
+    <!-- ── Core options ── -->
+    <div class="section-title">Tuy chon co ban</div>
     <div class="options-grid">
       <label class="checkbox-item">
         <input
@@ -24,7 +28,7 @@
           type="checkbox"
           :disabled="localMode === 'STRUCTURE_ONLY'"
         />
-        Xoa data dich truoc khi copy (truncate)
+        Xoa du lieu cu truoc khi migrate (TRUNCATE)
       </label>
 
       <label class="checkbox-item">
@@ -33,36 +37,70 @@
           type="checkbox"
           :disabled="localMode === 'STRUCTURE_ONLY'"
         />
-        Chi copy data moi
+        Chi copy ban ghi moi (theo PK — bo qua trung lap)
       </label>
 
-      <label class="field">
-        <span>Limit so dong copy (0 = tat ca)</span>
-        <input v-model.number="localOptions.limit" type="number" min="0" />
+      <label class="field-row">
+        <span>So dong toi da moi bang (Limit, 0 = tat ca)</span>
+        <input
+          v-model.number="localOptions.limit"
+          type="number"
+          min="0"
+          class="number-input"
+        />
       </label>
 
-      <label class="field">
-        <span>Include table (CSV)</span>
+      <label class="field-row">
+        <span>Chi migrate cac bang (CSV, trong = tat ca)</span>
         <input
           v-model.trim="localOptions.includeTablesCsv"
           type="text"
           placeholder="users,orders,order_items"
+          class="text-input"
         />
       </label>
 
-      <label class="field">
-        <span>Exclude table (CSV)</span>
+      <label class="field-row">
+        <span>Loai tru cac bang (CSV)</span>
         <input
           v-model.trim="localOptions.excludeTablesCsv"
           type="text"
           placeholder="audit_log,temp_table"
+          class="text-input"
         />
       </label>
     </div>
 
-    <!-- View Migration Options -->
+    <!-- ── Advanced objects ── -->
     <div class="section-divider">
-      <h3>View Migration</h3>
+      <h3>Doi tuong nang cao</h3>
+    </div>
+
+    <div class="options-grid">
+      <label class="checkbox-item">
+        <input v-model="localOptions.migrateSequences" type="checkbox" />
+        Sequences
+      </label>
+
+      <label class="checkbox-item">
+        <input v-model="localOptions.migrateIndexes" type="checkbox" />
+        Indexes
+      </label>
+
+      <label class="checkbox-item">
+        <input v-model="localOptions.migrateFunctions" type="checkbox" />
+        Functions / Procedures
+      </label>
+
+      <label class="checkbox-item">
+        <input v-model="localOptions.migrateTriggers" type="checkbox" />
+        Triggers
+      </label>
+    </div>
+
+    <!-- ── Views ── -->
+    <div class="section-divider">
+      <h3>Views</h3>
     </div>
 
     <div class="options-grid">
@@ -77,27 +115,110 @@
           type="checkbox"
           :disabled="!localOptions.migrateViews"
         />
-        Thay the views da ton tai (drop + create)
+        Thay the views da ton tai (DROP + CREATE)
       </label>
 
-      <label class="field">
-        <span>Include view (CSV)</span>
+      <label class="field-row">
+        <span>Chi migrate cac views (CSV)</span>
         <input
           v-model.trim="localOptions.includeViewsCsv"
           type="text"
           :disabled="!localOptions.migrateViews"
-          placeholder="view_users,view_orders"
+          placeholder="v_emp_details,v_orders_sum"
+          class="text-input"
         />
       </label>
 
-      <label class="field">
-        <span>Exclude view (CSV)</span>
+      <label class="field-row">
+        <span>Loai tru cac views (CSV)</span>
         <input
           v-model.trim="localOptions.excludeViewsCsv"
           type="text"
           :disabled="!localOptions.migrateViews"
-          placeholder="view_temp"
+          placeholder="v_temp"
+          class="text-input"
         />
+      </label>
+    </div>
+
+    <!-- ── Retry ── -->
+    <div class="section-divider">
+      <h3>Retry / Tu dong thu lai</h3>
+    </div>
+
+    <div class="options-grid">
+      <label class="checkbox-item">
+        <input v-model="localRetry.enabled" type="checkbox" />
+        Bat dau tinh nang retry khi gap loi tam thoi
+      </label>
+
+      <label class="field-row">
+        <span>So lan retry toi da</span>
+        <input
+          v-model.number="localRetry.maxAttempts"
+          type="number"
+          min="1"
+          max="20"
+          :disabled="!localRetry.enabled"
+          class="number-input small"
+        />
+      </label>
+
+      <label class="field-row">
+        <span>Delay ban dau (ms)</span>
+        <input
+          v-model.number="localRetry.initialDelayMs"
+          type="number"
+          min="0"
+          step="100"
+          :disabled="!localRetry.enabled"
+          class="number-input small"
+        />
+      </label>
+
+      <label class="field-row">
+        <span>He so backoff (nhan delay sau moi lan)</span>
+        <input
+          v-model.number="localRetry.backoffMultiplier"
+          type="number"
+          min="1"
+          max="10"
+          step="0.1"
+          :disabled="!localRetry.enabled"
+          class="number-input small"
+        />
+      </label>
+    </div>
+
+    <!-- ── Resume ── -->
+    <div class="section-divider">
+      <h3>Resume / Tiep tuc tu diem da dung</h3>
+    </div>
+
+    <div class="options-grid">
+      <label class="checkbox-item">
+        <input v-model="localResume.enabled" type="checkbox" />
+        Bat dau tinh nang resume (tiep tuc tu diem da dung)
+      </label>
+
+      <label class="field-row">
+        <span>Duong dan file checkpoint</span>
+        <input
+          v-model.trim="localResume.stateFile"
+          type="text"
+          :disabled="!localResume.enabled"
+          placeholder=".migration-resume.properties"
+          class="text-input"
+        />
+      </label>
+
+      <label class="checkbox-item">
+        <input
+          v-model="localResume.reset"
+          type="checkbox"
+          :disabled="!localResume.enabled"
+        />
+        Xoa checkpoint cu truoc khi bat dau (reset)
       </label>
     </div>
   </section>
@@ -114,10 +235,18 @@ const props = defineProps({
   options: {
     type: Object,
     required: true
+  },
+  retry: {
+    type: Object,
+    default: () => ({ enabled: false, maxAttempts: 3, initialDelayMs: 2000, backoffMultiplier: 2.0 })
+  },
+  resume: {
+    type: Object,
+    default: () => ({ enabled: false, stateFile: '.migration-resume.properties', reset: false })
   }
 });
 
-const emit = defineEmits(['update:migrationMode', 'update:options']);
+const emit = defineEmits(['update:migrationMode', 'update:options', 'update:retry', 'update:resume']);
 
 const localMode = computed({
   get: () => props.migrationMode,
@@ -125,22 +254,28 @@ const localMode = computed({
 });
 
 const localOptions = reactive({ ...props.options });
+const localRetry = reactive({ ...props.retry });
+const localResume = reactive({ ...props.resume });
 
 watch(
   () => props.options,
-  (nextValue) => {
-    Object.assign(localOptions, nextValue);
-  },
+  (nextValue) => Object.assign(localOptions, nextValue),
+  { deep: true }
+);
+watch(
+  () => props.retry,
+  (nextValue) => Object.assign(localRetry, nextValue),
+  { deep: true }
+);
+watch(
+  () => props.resume,
+  (nextValue) => Object.assign(localResume, nextValue),
   { deep: true }
 );
 
-watch(
-  localOptions,
-  (nextValue) => {
-    emit('update:options', { ...nextValue });
-  },
-  { deep: true }
-);
+watch(localOptions, (nextValue) => emit('update:options', { ...nextValue }), { deep: true });
+watch(localRetry, (nextValue) => emit('update:retry', { ...nextValue }), { deep: true });
+watch(localResume, (nextValue) => emit('update:resume', { ...nextValue }), { deep: true });
 </script>
 
 <style scoped>
@@ -158,6 +293,15 @@ h2 {
   margin: 0 0 14px;
 }
 
+.section-title {
+  color: #2d3f4d;
+  font-size: 0.78rem;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  margin: 0 0 8px;
+  text-transform: uppercase;
+}
+
 .radio-stack {
   display: grid;
   gap: 8px;
@@ -166,6 +310,7 @@ h2 {
 
 label {
   align-items: center;
+  cursor: pointer;
   display: flex;
   gap: 8px;
 }
@@ -173,6 +318,7 @@ label {
 .options-grid {
   display: grid;
   gap: 10px;
+  margin-bottom: 4px;
 }
 
 .checkbox-item {
@@ -180,33 +326,55 @@ label {
   font-size: 0.93rem;
 }
 
-.field {
-  align-items: stretch;
-  display: grid;
-  gap: 6px;
+.field-row {
+  align-items: center;
+  color: #2d3f4d;
+  display: flex;
+  gap: 10px;
+  font-size: 0.9rem;
+  justify-content: space-between;
 }
 
-.field span {
-  color: #415665;
-  font-size: 0.84rem;
-  font-weight: 700;
+.field-row > span {
+  flex: 1;
+  font-size: 0.85rem;
 }
 
-.field input {
+.text-input {
+  flex: 0 0 280px;
+}
+
+.number-input {
+  flex: 0 0 120px;
+}
+
+.number-input.small {
+  flex: 0 0 100px;
+}
+
+input[type="text"],
+input[type="number"] {
   background: #fdfbf8;
   border: 1px solid #d9d5cd;
   border-radius: 10px;
   color: #1f2b36;
   font-family: inherit;
-  font-size: 0.93rem;
+  font-size: 0.9rem;
   outline: none;
-  padding: 10px 11px;
+  padding: 8px 11px;
   transition: border-color 0.2s ease, box-shadow 0.2s ease;
 }
 
-.field input:focus {
+input:focus {
   border-color: #2d7ef7;
   box-shadow: 0 0 0 4px rgba(45, 126, 247, 0.14);
+}
+
+input:disabled {
+  background: #f0ede8;
+  color: #999;
+  cursor: not-allowed;
+  opacity: 0.7;
 }
 
 .section-divider {

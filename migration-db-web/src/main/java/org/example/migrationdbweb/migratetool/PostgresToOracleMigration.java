@@ -14,13 +14,21 @@ public class PostgresToOracleMigration extends DirectionalMigration {
 
     @Override
     protected DatabaseConfig buildSourceConfig() {
+        String password = getEnv("POSTGRES_PASSWORD", null);
+        if (password == null || password.isBlank()) {
+            throw new IllegalStateException(
+                    "POSTGRES_PASSWORD environment variable is not set. " +
+                    "Please set it before running migration. " +
+                    "Example: export POSTGRES_PASSWORD=your_secure_password"
+            );
+        }
         return new DatabaseConfig(
                 DatabaseType.POSTGRESQL,
                 getEnv("POSTGRES_HOST", "localhost"),
                 getEnvAsInt("POSTGRES_PORT", 5432),
                 getEnv("POSTGRES_DB", "migration_db"),
                 getEnv("POSTGRES_USER", "postgres"),
-                getEnv("POSTGRES_PASSWORD", "admin123")
+                password
         );
     }
 

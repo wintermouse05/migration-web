@@ -3,8 +3,6 @@ package org.example.migrationdbweb.migratetool;
 
 
 
-
-
 import java.awt.BorderLayout;
 import java.awt.Color;
 import java.awt.Dimension;
@@ -18,11 +16,13 @@ import java.util.LinkedHashSet;
 import java.util.Locale;
 import java.util.Set;
 
+import javax.swing.Box;
 import javax.swing.BorderFactory;
 import javax.swing.ButtonGroup;
 import javax.swing.JButton;
 import javax.swing.JCheckBox;
 import javax.swing.JComboBox;
+import javax.swing.JComponent;
 import javax.swing.JFrame;
 import javax.swing.JLabel;
 import javax.swing.JOptionPane;
@@ -40,78 +40,78 @@ import javax.swing.border.TitledBorder;
 
 public class MigrationAppUI extends JFrame {
 
-    // --- Các thành phần UI cần truy cập toàn cục ---
-    // Source DB
+    // --- UI Fields: Source DB ---
     private JComboBox<String> sourceDbTypeCombo;
     private JTextField sourceHostField, sourcePortField, sourceDbNameField, sourceUserField;
     private JPasswordField sourcePassField;
+    private JTextField sourceSchemaField;
 
-    // Target DB
+    // --- UI Fields: Target DB ---
     private JComboBox<String> targetDbTypeCombo;
     private JTextField targetHostField, targetPortField, targetDbNameField, targetUserField;
     private JPasswordField targetPassField;
+    private JTextField targetSchemaField;
 
-    // Options
+    // --- UI Fields: Migration mode ---
     private JRadioButton optCopyAll, optStructureOnly, optDataOnly;
     private JCheckBox chkTruncateTarget, chkCopyNewOnly;
-    private JTextField limitDataField;
+    private JTextField limitDataField, batchSizeField;
     private JTextField includeTablesField, excludeTablesField;
 
-    // Advanced object migration options
+    // --- UI Fields: Advanced objects ---
     private JCheckBox chkMigrateSequences, chkMigrateIndexes;
     private JCheckBox chkMigrateFunctions, chkMigrateTriggers;
+    private JCheckBox chkMigrateViews, chkReplaceExistingViews;
     private JTextField includeViewsField, excludeViewsField;
 
-    // Actions
+    // --- UI Fields: Retry ---
+    private JCheckBox chkRetryEnabled;
+    private JTextField retryMaxAttemptsField, retryDelayMsField, retryBackoffField;
+
+    // --- UI Fields: Resume ---
+    private JCheckBox chkResumeEnabled;
+    private JTextField resumeStateFileField;
+    private JCheckBox chkResumeReset;
+
+    // --- Actions ---
     private JButton btnStartMigration;
     private JTextArea logArea;
-
     private JProgressBar progressBar;
 
     public MigrationAppUI() {
         setTitle("Database Migration Tool");
-        setSize(850, 650);
+        setSize(1050, 820);
         setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
-        setLocationRelativeTo(null); // Hiển thị Egiữa màn hình
-        setLayout(new BorderLayout(10, 10)); // Khoảng cách giữa các vùng là 10px
-
+        setLocationRelativeTo(null);
+        setLayout(new BorderLayout(10, 10));
         initComponents();
     }
 
     private void initComponents() {
-        // 1. Khu vực Cấu hình DB (Bố trí phía Bắc)
+        // NORTH: DB config panels
         JPanel dbConfigPanel = new JPanel(new GridLayout(1, 2, 10, 0));
         dbConfigPanel.setBorder(BorderFactory.createEmptyBorder(10, 10, 10, 10));
-
-        JPanel sourcePanel = createDbConfigPanel("Source Database (Nguồn)", true);
-        JPanel targetPanel = createDbConfigPanel("Target Database (Đích)", false);
-
-        dbConfigPanel.add(sourcePanel);
-        dbConfigPanel.add(targetPanel);
+        dbConfigPanel.add(createDbConfigPanel("Source Database (Nguồn)", true));
+        dbConfigPanel.add(createDbConfigPanel("Target Database (Đích)", false));
         add(dbConfigPanel, BorderLayout.NORTH);
 
-        // 2. Khu vực Tùy chọn (BềEtrí ềEGiữa)
+        // CENTER: Options panel
         JPanel optionsPanel = createOptionsPanel();
         add(optionsPanel, BorderLayout.CENTER);
 
-        // 3. Khu vực Log và Nút Action (Bố trí phía Nam)
+        // SOUTH: Progress + Logs + Action button
         JPanel bottomPanel = createBottomPanel();
         add(bottomPanel, BorderLayout.SOUTH);
     }
 
     /**
-     * Hàm dùng chung để tạo Panel cấu hình kết nối.
-     * @param title Tiêu đề của Panel
-     * @param isSource Xác định đây là form Source hay Target để map đúng biến
+     * Tạo panel cấu hình kết nối DB (Source hoặc Target).
+     * Thêm trường Schema override.
      */
     private JPanel createDbConfigPanel(String title, boolean isSource) {
         JPanel panel = new JPanel(new BorderLayout(5, 5));
         panel.setBorder(BorderFactory.createTitledBorder(
                 BorderFactory.createEtchedBorder(), title, TitledBorder.LEFT, TitledBorder.TOP));
-
-        // Form nhập liệu
-        JPanel formPanel = new JPanel(new GridLayout(6, 2, 5, 5));
-        formPanel.setBorder(BorderFactory.createEmptyBorder(5, 5, 5, 5));
 
         JComboBox<String> dbTypeCombo = new JComboBox<>(new String[]{"Oracle", "PostgreSQL"});
         JTextField hostField = new JTextField(isSource ? "localhost" : "127.0.0.1");
@@ -119,31 +119,49 @@ public class MigrationAppUI extends JFrame {
         JTextField dbNameField = new JTextField(isSource ? "ORCL" : "migration_db");
         JTextField userField = new JTextField(isSource ? "scott" : "postgres");
         JPasswordField passField = new JPasswordField();
-        if (isSource) {
-            passField.setText("tiger");
-        }
+        JTextField schemaField = new JTextField(isSource ? "" : "public");
 
-        // Lưu tham chiếu vào biến toàn cục tương ứng
         if (isSource) {
-            this.sourceDbTypeCombo = dbTypeCombo; this.sourceHostField = hostField;
-            this.sourcePortField = portField; this.sourceDbNameField = dbNameField;
-            this.sourceUserField = userField; this.sourcePassField = passField;
+            sourceDbTypeCombo = dbTypeCombo; sourceHostField = hostField;
+            sourcePortField = portField; sourceDbNameField = dbNameField;
+            sourceUserField = userField; sourcePassField = passField;
+            sourceSchemaField = schemaField;
         } else {
-            this.targetDbTypeCombo = dbTypeCombo; this.targetHostField = hostField;
-            this.targetPortField = portField; this.targetDbNameField = dbNameField;
-            this.targetUserField = userField; this.targetPassField = passField;
+            targetDbTypeCombo = dbTypeCombo; targetHostField = hostField;
+            targetPortField = portField; targetDbNameField = dbNameField;
+            targetUserField = userField; targetPassField = passField;
+            targetSchemaField = schemaField;
         }
 
-        formPanel.add(new JLabel("Database Type:")); formPanel.add(dbTypeCombo);
-        formPanel.add(new JLabel("Host:")); formPanel.add(hostField);
-        formPanel.add(new JLabel("Port:")); formPanel.add(portField);
-        formPanel.add(new JLabel("DB Name / SID:")); formPanel.add(dbNameField);
-        formPanel.add(new JLabel("Username:")); formPanel.add(userField);
-        formPanel.add(new JLabel("Password:")); formPanel.add(passField);
+        // Grid 7 rows: type, host, port, dbname, user, pass, schema
+        JPanel formPanel = new JPanel(new GridLayout(7, 1, 5, 5));
+        formPanel.setBorder(BorderFactory.createEmptyBorder(5, 5, 5, 5));
+
+        // Row: Database Type
+        formPanel.add(makeLabeledRow("Database Type:", dbTypeCombo));
+
+        // Row: Host
+        formPanel.add(makeLabeledRow("Host:", hostField));
+
+        // Row: Port
+        formPanel.add(makeLabeledRow("Port:", portField));
+
+        // Row: DB Name / SID
+        formPanel.add(makeLabeledRow("DB Name / SID:", dbNameField));
+
+        // Row: Username
+        formPanel.add(makeLabeledRow("Username:", userField));
+
+        // Row: Password
+        formPanel.add(makeLabeledRow("Password:", passField));
+
+        // Row: Schema — đặt preferred width để field rộng, dễ nhập
+        schemaField.setPreferredSize(new Dimension(300, 22));
+        schemaField.setToolTipText("Bo trong = dung schema mac dinh (Oracle: username.uppercase, PG: public)");
+        formPanel.add(makeLabeledRow("Schema (override):", schemaField));
 
         panel.add(formPanel, BorderLayout.CENTER);
 
-        // Nút Test Connection
         JButton btnTest = new JButton("Test Connection");
         btnTest.addActionListener(e -> testConnectionAction(isSource));
         JPanel btnPanel = new JPanel(new FlowLayout(FlowLayout.RIGHT));
@@ -153,134 +171,463 @@ public class MigrationAppUI extends JFrame {
         return panel;
     }
 
-    public void enableStartButton(boolean enable) {
-        btnStartMigration.setEnabled(enable);
-    }
-
     /**
-     * Tạo Panel chứa các tùy chọn Migration
+     * Tạo panel tùy chọn migration — chia thành các section rõ ràng.
      */
     private JPanel createOptionsPanel() {
-        JPanel panel = new JPanel(new GridBagLayout()); // Dùng GridBagLayout cho linh hoạt
-        panel.setBorder(BorderFactory.createTitledBorder("Migration Options"));
+        JPanel panel = new JPanel(new GridBagLayout());
+        panel.setBorder(BorderFactory.createEmptyBorder(10, 10, 10, 10));
         GridBagConstraints gbc = new GridBagConstraints();
         gbc.anchor = GridBagConstraints.WEST;
-        gbc.insets = new Insets(5, 10, 5, 10);
+        gbc.insets = new Insets(4, 8, 4, 8);
+        gbc.fill = GridBagConstraints.HORIZONTAL;
+        gbc.weightx = 1.0;
 
-        // Nhóm RadioButton cho chế độ chính (chọn 1)
-        optCopyAll = new JRadioButton("Copy cả Cấu trúc và Dữ liệu", true);
-        optStructureOnly = new JRadioButton("Chỉ copy Cấu trúc (DDL)");
-        optDataOnly = new JRadioButton("Chỉ copy Dữ liệu (DML)");
+        int row = 0;
+
+        // ── SECTION: Migration Mode ──────────────────────────────────────
+        addSectionHeader(panel, gbc, row++, "1. CHE DO MIGRATION");
+        optCopyAll = new JRadioButton("Copy cau truc va du lieu", true);
+        optStructureOnly = new JRadioButton("Chi copy cau truc (DDL)");
+        optDataOnly = new JRadioButton("Chi copy du lieu (DML)");
         ButtonGroup modeGroup = new ButtonGroup();
         modeGroup.add(optCopyAll); modeGroup.add(optStructureOnly); modeGroup.add(optDataOnly);
-
-        // Checkbox cho các tùy chọn phụ
-        chkTruncateTarget = new JCheckBox("Xóa dữ liệu cũ Target trước khi copy (TRUNCATE)");
-        chkCopyNewOnly = new JCheckBox("Copy dữ liệu mới (Dựa vào PK - Tính năng nâng cao)");
-
-        // Input giới hạn dữ liệu
-        JPanel limitPanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 0, 0));
-        limitPanel.add(new JLabel("Giới hạn dòng copy (Limit): "));
-        limitDataField = new JTextField("0", 10);
-        limitDataField.setToolTipText("Nhap 0 copy toan bo");
-        limitPanel.add(limitDataField);
-
-        JPanel includePanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 0, 0));
-        includePanel.add(new JLabel("Migrate các bảng (CSV): "));
-        includeTablesField = new JTextField("", 24);
-        includeTablesField.setToolTipText("Ví dụ: users,orders,order_items");
-        includePanel.add(includeTablesField);
-
-        JPanel excludePanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 0, 0));
-        excludePanel.add(new JLabel("Exclude các bảng (CSV): "));
-        excludeTablesField = new JTextField("", 24);
-        excludeTablesField.setToolTipText("Ví dụ: audit_log,temp_table");
-        excludePanel.add(excludeTablesField);
-
-        // ─── Advanced object migration options ───────────────────────
-        JPanel advancedLabelPanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 0, 0));
-        JLabel advancedLabel = new JLabel("Đối tượng nâng cao:");
-        advancedLabel.setFont(new Font("Arial", Font.BOLD, 11));
-        advancedLabelPanel.add(advancedLabel);
-
-        chkMigrateSequences = new JCheckBox("Sequences");
-        chkMigrateIndexes    = new JCheckBox("Indexes");
-        chkMigrateFunctions  = new JCheckBox("Functions/Procedures");
-        chkMigrateTriggers   = new JCheckBox("Triggers");
-
-        JPanel advancedCheckPanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 5, 0));
-        advancedCheckPanel.add(chkMigrateSequences);
-        advancedCheckPanel.add(chkMigrateIndexes);
-        advancedCheckPanel.add(chkMigrateFunctions);
-        advancedCheckPanel.add(chkMigrateTriggers);
-
-        JPanel includeViewsPanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 0, 0));
-        includeViewsPanel.add(new JLabel("  Include Views (CSV): "));
-        includeViewsField = new JTextField("", 20);
-        includeViewsField.setToolTipText("Ví dụ: v_emp_details,v_orders_sum");
-        includeViewsPanel.add(includeViewsField);
-
-        JPanel excludeViewsPanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 0, 0));
-        excludeViewsPanel.add(new JLabel("  Exclude Views (CSV): "));
-        excludeViewsField = new JTextField("", 20);
-        excludeViewsField.setToolTipText("Ví dụ: v_temp");
-        excludeViewsPanel.add(excludeViewsField);
-
-        // BềEtrí vào Panel
-        gbc.gridx = 0; gbc.gridy = 0; panel.add(optCopyAll, gbc);
-        gbc.gridx = 1; gbc.gridy = 0; panel.add(chkTruncateTarget, gbc);
-
-        gbc.gridx = 0; gbc.gridy = 1; panel.add(optStructureOnly, gbc);
-        gbc.gridx = 1; gbc.gridy = 1; panel.add(chkCopyNewOnly, gbc);
-
-        gbc.gridx = 0; gbc.gridy = 2; panel.add(optDataOnly, gbc);
-        gbc.gridx = 1; gbc.gridy = 2; panel.add(limitPanel, gbc);
-
-        gbc.gridx = 0; gbc.gridy = 3; gbc.gridwidth = 2; panel.add(includePanel, gbc);
-        gbc.gridx = 0; gbc.gridy = 4; gbc.gridwidth = 2; panel.add(excludePanel, gbc);
-        gbc.gridx = 0; gbc.gridy = 5; gbc.gridwidth = 2; panel.add(advancedLabelPanel, gbc);
-        gbc.gridx = 0; gbc.gridy = 6; gbc.gridwidth = 2; panel.add(advancedCheckPanel, gbc);
-        gbc.gridx = 0; gbc.gridy = 7; gbc.gridwidth = 2; panel.add(includeViewsPanel, gbc);
-        gbc.gridx = 0; gbc.gridy = 8; gbc.gridwidth = 2; panel.add(excludeViewsPanel, gbc);
+        gbc.gridwidth = 2;
+        gbc.gridx = 0; gbc.gridy = row++; panel.add(optCopyAll, gbc);
+        gbc.gridx = 0; gbc.gridy = row++; panel.add(optStructureOnly, gbc);
+        gbc.gridx = 0; gbc.gridy = row++; panel.add(optDataOnly, gbc);
         gbc.gridwidth = 1;
+
+        // ── SECTION: Core options ─────────────────────────────────────────
+        addSectionHeader(panel, gbc, row++, "2. TUY CHON CO BAN");
+        chkTruncateTarget = new JCheckBox("Xoa du lieu cu target truoc khi migrate (TRUNCATE)");
+        chkCopyNewOnly = new JCheckBox("Chi copy ban ghi moi (theo PK — bo qua trung lap)");
+        gbc.gridx = 0; gbc.gridy = row++; gbc.gridwidth = 2; panel.add(chkTruncateTarget, gbc); gbc.gridwidth = 1;
+        gbc.gridx = 0; gbc.gridy = row++; gbc.gridwidth = 2; panel.add(chkCopyNewOnly, gbc); gbc.gridwidth = 1;
+
+        // Batch size + Limit
+        JPanel row2 = new JPanel(new FlowLayout(FlowLayout.LEFT, 5, 0));
+        row2.add(new JLabel("Batch size (rows/batch):"));
+        batchSizeField = new JTextField("1000", 7);
+        batchSizeField.setToolTipText("So dong migrate trong mot batch. Tang de toc do, giam de tranh tran bo nho.");
+        row2.add(batchSizeField);
+        row2.add(Box.createHorizontalStrut(20));
+        row2.add(new JLabel("Limit/bang (0 = tat ca):"));
+        limitDataField = new JTextField("0", 7);
+        limitDataField.setToolTipText("Nhap 0 de copy toan bo dong.");
+        row2.add(limitDataField);
+        gbc.gridx = 0; gbc.gridy = row++; gbc.gridwidth = 2; panel.add(row2, gbc); gbc.gridwidth = 1;
+
+        // Include / Exclude tables
+        JPanel includePanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 0, 2));
+        includePanel.add(new JLabel("Include bang (CSV):"));
+        includeTablesField = new JTextField("", 28);
+        includeTablesField.setToolTipText("Vi du: users,orders,order_items. Bo trong = migrate tat ca.");
+        includePanel.add(includeTablesField);
+        gbc.gridx = 0; gbc.gridy = row++; gbc.gridwidth = 2; panel.add(includePanel, gbc); gbc.gridwidth = 1;
+
+        JPanel excludePanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 0, 2));
+        excludePanel.add(new JLabel("Exclude bang  (CSV):"));
+        excludeTablesField = new JTextField("", 28);
+        excludeTablesField.setToolTipText("Vi du: audit_log,temp_table");
+        excludePanel.add(excludeTablesField);
+        gbc.gridx = 0; gbc.gridy = row++; gbc.gridwidth = 2; panel.add(excludePanel, gbc); gbc.gridwidth = 1;
+
+        // ── SECTION: Advanced objects ──────────────────────────────────────
+        addSectionHeader(panel, gbc, row++, "3. DOI TUONG NANG CAO");
+        chkMigrateSequences = new JCheckBox("Sequences");
+        chkMigrateIndexes   = new JCheckBox("Indexes");
+        chkMigrateFunctions = new JCheckBox("Functions/Procedures");
+        chkMigrateTriggers = new JCheckBox("Triggers");
+
+        JPanel advRow1 = new JPanel(new FlowLayout(FlowLayout.LEFT, 5, 0));
+        advRow1.add(chkMigrateSequences); advRow1.add(chkMigrateIndexes);
+        gbc.gridx = 0; gbc.gridy = row++; gbc.gridwidth = 2; panel.add(advRow1, gbc); gbc.gridwidth = 1;
+
+        JPanel advRow2 = new JPanel(new FlowLayout(FlowLayout.LEFT, 5, 0));
+        advRow2.add(chkMigrateFunctions); advRow2.add(chkMigrateTriggers);
+        gbc.gridx = 0; gbc.gridy = row++; gbc.gridwidth = 2; panel.add(advRow2, gbc); gbc.gridwidth = 1;
+
+        // ── SECTION: Views ────────────────────────────────────────────────
+        addSectionHeader(panel, gbc, row++, "4. VIEWS");
+        chkMigrateViews = new JCheckBox("Migrate views");
+        chkReplaceExistingViews = new JCheckBox("Thay the views da ton tai (DROP + CREATE)");
+        gbc.gridx = 0; gbc.gridy = row++; gbc.gridwidth = 2; panel.add(chkMigrateViews, gbc); gbc.gridwidth = 1;
+        gbc.gridx = 0; gbc.gridy = row++; gbc.gridwidth = 2; panel.add(chkReplaceExistingViews, gbc); gbc.gridwidth = 1;
+
+        JPanel includeViewsPanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 0, 2));
+        includeViewsPanel.add(new JLabel("  Include views (CSV):"));
+        includeViewsField = new JTextField("", 28);
+        includeViewsField.setToolTipText("Vi du: v_emp_details,v_orders_sum");
+        includeViewsPanel.add(includeViewsField);
+        gbc.gridx = 0; gbc.gridy = row++; gbc.gridwidth = 2; panel.add(includeViewsPanel, gbc); gbc.gridwidth = 1;
+
+        JPanel excludeViewsPanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 0, 2));
+        excludeViewsPanel.add(new JLabel("  Exclude views  (CSV):"));
+        excludeViewsField = new JTextField("", 28);
+        excludeViewsField.setToolTipText("Vi du: v_temp");
+        excludeViewsPanel.add(excludeViewsField);
+        gbc.gridx = 0; gbc.gridy = row++; gbc.gridwidth = 2; panel.add(excludeViewsPanel, gbc); gbc.gridwidth = 1;
+
+        // ── SECTION: Retry ────────────────────────────────────────────────
+        addSectionHeader(panel, gbc, row++, "5. RETRY / TU DONG THU LAI");
+        chkRetryEnabled = new JCheckBox("Bat dau tinh nang retry khi gap loi tam thoi");
+
+        JPanel retryRow1 = new JPanel(new FlowLayout(FlowLayout.LEFT, 5, 0));
+        retryRow1.add(new JLabel("So lan retry toi da:"));
+        retryMaxAttemptsField = new JTextField("3", 5);
+        retryRow1.add(retryMaxAttemptsField);
+        retryRow1.add(Box.createHorizontalStrut(10));
+        retryRow1.add(new JLabel("Delay ban dau (ms):"));
+        retryDelayMsField = new JTextField("2000", 7);
+        retryRow1.add(retryDelayMsField);
+        retryRow1.add(Box.createHorizontalStrut(10));
+        retryRow1.add(new JLabel("Backoff multiplier:"));
+        retryBackoffField = new JTextField("2.0", 5);
+        retryRow1.add(retryBackoffField);
+
+        gbc.gridx = 0; gbc.gridy = row++; gbc.gridwidth = 2; panel.add(chkRetryEnabled, gbc); gbc.gridwidth = 1;
+        gbc.gridx = 0; gbc.gridy = row++; gbc.gridwidth = 2; panel.add(retryRow1, gbc); gbc.gridwidth = 1;
+
+        // ── SECTION: Resume ───────────────────────────────────────────────
+        addSectionHeader(panel, gbc, row++, "6. RESUME / TIEP TUC TU DIEM DA DUNG");
+        chkResumeEnabled = new JCheckBox("Bat dau tinh nang resume (tiep tuc tu diem da dung)");
+
+        JPanel resumeRow1 = new JPanel(new FlowLayout(FlowLayout.LEFT, 5, 0));
+        resumeRow1.add(new JLabel("File checkpoint:"));
+        resumeStateFileField = new JTextField(".migration-resume.properties", 26);
+        resumeStateFileField.setToolTipText("Duong dan tuyet doi hoac tuong doi toi file checkpoint.");
+        resumeRow1.add(resumeStateFileField);
+        this.chkResumeReset = new JCheckBox("Reset checkpoint cu?");
+        resumeRow1.add(Box.createHorizontalStrut(10));
+        resumeRow1.add(this.chkResumeReset);
+
+        gbc.gridx = 0; gbc.gridy = row++; gbc.gridwidth = 2; panel.add(chkResumeEnabled, gbc); gbc.gridwidth = 1;
+        gbc.gridx = 0; gbc.gridy = row++; gbc.gridwidth = 2; panel.add(resumeRow1, gbc); gbc.gridwidth = 1;
+
+        // ── SECTION: Hang detection note ─────────────────────────────────
+        JPanel notePanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 0, 4));
+        JLabel note = new JLabel("Neu tien trinh bi treo hon 5 phut ma khong co log moi, vui long kiem tra ket noi DB.");
+        note.setFont(new Font("Arial", Font.ITALIC, 11));
+        note.setForeground(new Color(120, 100, 80));
+        notePanel.add(note);
+        gbc.gridx = 0; gbc.gridy = row++; gbc.gridwidth = 2; panel.add(notePanel, gbc); gbc.gridwidth = 1;
 
         return panel;
     }
 
     /**
-     * Tạo Panel chứa Log và Nút bắt đầu
+     * Thêm một section header label vào panel.
      */
+    private void addSectionHeader(JPanel panel, GridBagConstraints gbc, int row, String title) {
+        JLabel label = new JLabel(title);
+        label.setFont(new Font("Arial", Font.BOLD, 12));
+        label.setForeground(new Color(30, 80, 160));
+        gbc.gridx = 0; gbc.gridy = row;
+        gbc.gridwidth = 2;
+        panel.add(label, gbc);
+        gbc.gridwidth = 1;
+        // Add a separator line
+        JPanel sep = new JPanel();
+        sep.setPreferredSize(new Dimension(10, 2));
+        sep.setBackground(new Color(180, 200, 240));
+        gbc.gridx = 0; gbc.gridy = row;
+        gbc.gridwidth = 2;
+        gbc.fill = GridBagConstraints.HORIZONTAL;
+        gbc.ipady = 2;
+        panel.add(sep, gbc);
+        gbc.fill = GridBagConstraints.HORIZONTAL;
+        gbc.ipady = 0;
+        gbc.gridwidth = 1;
+    }
+
+    /** SwingUtilities.invokeLater wrapper */
+    public void appendLog(String message) {
+        SwingUtilities.invokeLater(() -> {
+            logArea.append(message + "\n");
+            logArea.setCaretPosition(logArea.getDocument().getLength());
+        });
+    }
+
+    /** Enable/disable the Start button */
+    public void enableStartButton(boolean enable) {
+        SwingUtilities.invokeLater(() -> btnStartMigration.setEnabled(enable));
+    }
+
+    /** Kích hoạt khi nhấn Start Migration */
+    private void startMigrationAction() {
+        // ── 1. Build DatabaseConfig ───────────────────────────────────
+        DatabaseConfig sourceConfig;
+        DatabaseConfig targetConfig;
+        try {
+            sourceConfig = buildDatabaseConfig(true);
+            targetConfig = buildDatabaseConfig(false);
+        } catch (IllegalArgumentException e) {
+            JOptionPane.showMessageDialog(this, e.getMessage(), "Loi cau hinh", JOptionPane.ERROR_MESSAGE);
+            return;
+        }
+
+        // ── 2. Parse simple options ───────────────────────────────────
+        boolean isStructureOnly = optStructureOnly.isSelected();
+        boolean isDataOnly = optDataOnly.isSelected();
+        boolean truncateTarget = chkTruncateTarget.isSelected();
+        boolean copyNewOnly = chkCopyNewOnly.isSelected();
+
+        Integer limitRows = parseIntField(limitDataField, 0, "Limit");
+        int batchSize = parseIntField(batchSizeField, 1000, "Batch size");
+        batchSize = Math.max(1, batchSize);
+
+        Set<String> includeTables = parseCsvTableSet(includeTablesField.getText());
+        Set<String> excludeTables = parseCsvTableSet(excludeTablesField.getText());
+        Set<String> includeViews  = parseCsvTableSet(includeViewsField.getText());
+        Set<String> excludeViews  = parseCsvTableSet(excludeViewsField.getText());
+
+        // Schema: dùng override nếu có, không thì dùng default
+        String sourceSchema = parseSchema(sourceSchemaField, sourceConfig);
+        String targetSchema = parseSchema(targetSchemaField, targetConfig);
+
+        // ── 3. Parse Retry policy ───────────────────────────────────────
+        boolean retryEnabled = chkRetryEnabled.isSelected();
+        int retryMaxAttempts = parseIntField(retryMaxAttemptsField, 3, "Retry max attempts");
+        long retryDelayMs = parseLongField(retryDelayMsField, 2000L, "Retry delay ms");
+        double retryBackoff = parseDoubleField(retryBackoffField, 2.0, "Backoff multiplier");
+
+        MigrationRetryPolicy retryPolicy = new MigrationRetryPolicy(
+                retryEnabled,
+                retryMaxAttempts,
+                retryDelayMs,
+                retryBackoff,
+                false, // resumeEnabled — set below
+                null,  // resumeStateFile — set below
+                false  // resetResumeState — set below
+        );
+
+        // ── 4. Parse Resume options ────────────────────────────────────
+        boolean resumeEnabled = chkResumeEnabled.isSelected();
+        String resumeStateFile = resumeStateFileField.getText();
+        boolean resumeReset = chkResumeReset != null && chkResumeReset.isSelected();
+
+        MigrationRetryPolicy effectiveRetryPolicy;
+        if (resumeEnabled) {
+            effectiveRetryPolicy = new MigrationRetryPolicy(
+                    retryEnabled,
+                    retryMaxAttempts,
+                    retryDelayMs,
+                    retryBackoff,
+                    true,
+                    resumeStateFile,
+                    resumeReset
+            );
+        } else {
+            effectiveRetryPolicy = retryPolicy;
+        }
+
+        // ── 5. Advanced object flags ──────────────────────────────────
+        boolean migrateSequences = chkMigrateSequences.isSelected();
+        boolean migrateIndexes   = chkMigrateIndexes.isSelected();
+        boolean migrateFunctions = chkMigrateFunctions.isSelected();
+        boolean migrateTriggers  = chkMigrateTriggers.isSelected();
+        boolean migrateViews      = chkMigrateViews.isSelected();
+        boolean replaceExistingViews = chkReplaceExistingViews.isSelected();
+
+        // ── 6. UI lock & clear ───────────────────────────────────────
+        enableStartButton(false);
+        progressBar.setValue(0);
+        logArea.setText("");
+
+        appendLog("=== BAT DAU MIGRATION ===");
+        appendLog("Source: " + sourceConfig);
+        appendLog("Target: " + targetConfig);
+        appendLog("Schema source=" + sourceSchema + " | target=" + targetSchema);
+        appendLog("Mode: " + (isStructureOnly ? "STRUCTURE_ONLY" : isDataOnly ? "DATA_ONLY" : "ALL"));
+        appendLog("Batch size: " + batchSize + " | Limit: " + (limitRows == null ? "ALL" : limitRows));
+        appendLog("Truncate: " + truncateTarget + " | CopyNewOnly: " + copyNewOnly);
+        appendLog("Retry: enabled=" + retryEnabled + " attempts=" + retryMaxAttempts
+                + " delay=" + retryDelayMs + "ms backoff=" + retryBackoff);
+        appendLog("Resume: enabled=" + resumeEnabled + " file=" + (resumeEnabled ? resumeStateFile : "N/A"));
+        appendLog("Advanced: seq=" + migrateSequences + " idx=" + migrateIndexes
+                + " fn=" + migrateFunctions + " trig=" + migrateTriggers);
+        appendLog("Views: migrate=" + migrateViews + " replace=" + replaceExistingViews);
+        appendLog("-------------------------------");
+
+        // ── 7. Create and start worker ────────────────────────────────
+        MigrationWorker worker = new MigrationWorker(
+                this,
+                isStructureOnly,
+                isDataOnly,
+                sourceConfig,
+                targetConfig,
+                sourceSchema,
+                targetSchema,
+                batchSize,
+                truncateTarget,
+                copyNewOnly,
+                limitRows,
+                includeTables,
+                excludeTables,
+                migrateSequences,
+                migrateIndexes,
+                migrateFunctions,
+                migrateTriggers,
+                migrateViews,
+                replaceExistingViews,
+                includeViews,
+                excludeViews,
+                effectiveRetryPolicy
+        );
+
+        worker.addPropertyChangeListener(evt -> {
+            if ("progress".equals(evt.getPropertyName())) {
+                int prog = (Integer) evt.getNewValue();
+                SwingUtilities.invokeLater(() -> progressBar.setValue(prog));
+            }
+        });
+
+        worker.execute();
+    }
+
+    /** Build DatabaseConfig từ form fields. */
+    private DatabaseConfig buildDatabaseConfig(boolean isSource) {
+        String selectedType = isSource
+                ? (String) sourceDbTypeCombo.getSelectedItem()
+                : (String) targetDbTypeCombo.getSelectedItem();
+
+        DatabaseType dbType = parseDatabaseType(selectedType);
+        String host = requireText(isSource ? sourceHostField : targetHostField, "Host");
+        int port = parsePort(isSource);
+        String dbName = requireText(isSource ? sourceDbNameField : targetDbNameField, "DB Name / SID");
+        String username = requireText(isSource ? sourceUserField : targetUserField, "Username");
+        String password = new String(isSource ? sourcePassField.getPassword() : targetPassField.getPassword());
+
+        return new DatabaseConfig(dbType, host, port, dbName, username, password);
+    }
+
+    /** Schema: dùng field override nếu filled, không thì default logic. */
+    private String parseSchema(JTextField schemaField, DatabaseConfig config) {
+        String override = schemaField.getText();
+        if (override != null && !override.trim().isBlank()) {
+            return override.trim();
+        }
+        // Default schema
+        if (config.getType() == DatabaseType.ORACLE) {
+            return config.getUsername().toUpperCase(Locale.ROOT);
+        }
+        return "public";
+    }
+
+    private DatabaseType parseDatabaseType(String selected) {
+        if ("Oracle".equalsIgnoreCase(selected)) return DatabaseType.ORACLE;
+        if ("PostgreSQL".equalsIgnoreCase(selected)) return DatabaseType.POSTGRESQL;
+        throw new IllegalArgumentException("Database Type khong hop le: " + selected);
+    }
+
+    private String requireText(JTextField field, String label) {
+        String v = field.getText();
+        if (v == null || v.isBlank()) throw new IllegalArgumentException(label + " khong duoc de trong.");
+        return v.trim();
+    }
+
+    private int parsePort(boolean isSource) {
+        String raw = (isSource ? sourcePortField : targetPortField).getText();
+        try {
+            return Integer.parseInt(raw.trim());
+        } catch (NumberFormatException e) {
+            throw new IllegalArgumentException("Port khong hop le: " + raw);
+        }
+    }
+
+    private Integer parseIntField(JTextField field, int defaultVal, String label) {
+        String raw = field.getText();
+        if (raw == null || raw.isBlank()) return defaultVal;
+        try {
+            int v = Integer.parseInt(raw.trim());
+            if (v < 0) throw new IllegalArgumentException(label + " phai >= 0.");
+            return v;
+        } catch (NumberFormatException e) {
+            throw new IllegalArgumentException(label + " khong hop le: " + raw);
+        }
+    }
+
+    private long parseLongField(JTextField field, long defaultVal, String label) {
+        String raw = field.getText();
+        if (raw == null || raw.isBlank()) return defaultVal;
+        try {
+            return Long.parseLong(raw.trim());
+        } catch (NumberFormatException e) {
+            throw new IllegalArgumentException(label + " khong hop le: " + raw);
+        }
+    }
+
+    private double parseDoubleField(JTextField field, double defaultVal, String label) {
+        String raw = field.getText();
+        if (raw == null || raw.isBlank()) return defaultVal;
+        try {
+            return Double.parseDouble(raw.trim());
+        } catch (NumberFormatException e) {
+            throw new IllegalArgumentException(label + " khong hop le: " + raw);
+        }
+    }
+
+    private Set<String> parseCsvTableSet(String raw) {
+        Set<String> set = new LinkedHashSet<>();
+        if (raw == null || raw.isBlank()) return set;
+        for (String part : raw.split(",")) {
+            if (part == null) continue;
+            String v = part.trim();
+            if (!v.isEmpty()) set.add(v.toUpperCase(Locale.ROOT));
+        }
+        return set;
+    }
+
+    /** Test connection button handler. */
+    private void testConnectionAction(boolean isSource) {
+        ConnectionManager mgr = ConnectionManager.getInstance();
+        String poolId = "UI_TEST_" + (isSource ? "SRC" : "TGT") + "_" + System.nanoTime();
+        try {
+            DatabaseConfig config = buildDatabaseConfig(isSource);
+            String label = isSource ? "SOURCE" : "TARGET";
+            appendLog("Dang test ket noi " + label + "...");
+            mgr.createPool(poolId, config);
+            if (mgr.testConnection(poolId)) {
+                appendLog("[OK] " + label + " ket noi thanh cong.\n");
+            } else {
+                appendLog("[LOI] " + label + " khong the ket noi.\n");
+            }
+        } catch (Exception e) {
+            appendLog("[LOI] " + e.getMessage() + "\n");
+        } finally {
+            mgr.closePool(poolId);
+        }
+    }
+
+    /** Bottom panel: progress bar + start button + log area. */
     private JPanel createBottomPanel() {
         JPanel panel = new JPanel(new BorderLayout(5, 5));
         panel.setBorder(BorderFactory.createEmptyBorder(10, 10, 10, 10));
 
-        // Nút Start
-        btnStartMigration = new JButton("START MIGRATION");
-        btnStartMigration.setFont(new Font("Arial", Font.BOLD, 16));
-        btnStartMigration.setBackground(new Color(46, 172, 204));
-        btnStartMigration.setForeground(Color.GREEN);
-        btnStartMigration.setPreferredSize(new Dimension(200, 50));
+        // Top row: Start button + Progress bar
+        JPanel topRow = new JPanel(new BorderLayout(5, 5));
+        btnStartMigration = new JButton("BAT DAU MIGRATION");
+        btnStartMigration.setFont(new Font("Arial", Font.BOLD, 15));
+        btnStartMigration.setBackground(new Color(30, 130, 80));
+        btnStartMigration.setForeground(Color.WHITE);
+        btnStartMigration.setPreferredSize(new Dimension(220, 48));
         btnStartMigration.addActionListener(e -> startMigrationAction());
+        topRow.add(btnStartMigration, BorderLayout.WEST);
 
-        JPanel btnWrapper = new JPanel(new FlowLayout(FlowLayout.CENTER));
-        btnWrapper.add(btnStartMigration);
+        progressBar = new JProgressBar(0, 100);
+        progressBar.setStringPainted(true);
+        progressBar.setFont(new Font("Arial", Font.PLAIN, 12));
+        topRow.add(progressBar, BorderLayout.CENTER);
 
-        // --- THÊM MỚI: JProgressBar ---
-        progressBar = new JProgressBar(0, 100); // Từ 0% đến 100%
-        progressBar.setStringPainted(true); // Hiển thềEcon sềE% text
-        progressBar.setValue(0);
+        panel.add(topRow, BorderLayout.NORTH);
 
-        // Gộp Nút và Progress Bar vào khu vực phía Bắc của Bottom Panel
-        JPanel northBottomPanel = new JPanel(new BorderLayout(0, 5));
-        northBottomPanel.add(btnWrapper, BorderLayout.NORTH);
-        northBottomPanel.add(progressBar, BorderLayout.SOUTH);
-
-        panel.add(northBottomPanel, BorderLayout.NORTH);
-
-        // Khu vực Log
-        logArea = new JTextArea(8, 50);
+        // Log area
+        logArea = new JTextArea(10, 80);
         logArea.setEditable(false);
-        logArea.setFont(new Font("Monospaced", Font.PLAIN, 12));
+        logArea.setFont(new Font("Consolas", Font.PLAIN, 12));
+        logArea.setBackground(new Color(18, 18, 30));
+        logArea.setForeground(new Color(200, 230, 160));
         JScrollPane scrollPane = new JScrollPane(logArea);
         scrollPane.setBorder(BorderFactory.createTitledBorder("Execution Logs"));
         panel.add(scrollPane, BorderLayout.CENTER);
@@ -288,218 +635,31 @@ public class MigrationAppUI extends JFrame {
         return panel;
     }
 
-    // --- CÁC HÀM XỬ LÁESỰ KIềE (EVENT HANDLERS) ---
-
-    private void testConnectionAction(boolean isSource) {
-        String typeLabel = isSource ? "SOURCE" : "TARGET";
-        ConnectionManager manager = ConnectionManager.getInstance();
-        String poolId = "UI_TEST_" + typeLabel + "_" + System.nanoTime();
-
-        try {
-            DatabaseConfig config = buildDatabaseConfig(isSource);
-            appendLog("Đang kiểm tra kết nối " + typeLabel + " (" + config.getType() + ")...");
-            manager.createPool(poolId, config);
-
-            if (manager.testConnection(poolId)) {
-                appendLog("[SUCCESS] Kết nối " + typeLabel + " thành công!\n");
-                return;
-            }
-
-            appendLog("[FAILED] Không thể kết nối " + typeLabel + ".\n");
-        } catch (RuntimeException e) {
-            appendLog("[FAILED] Lỗi kết nối " + typeLabel + ": " + e.getMessage() + "\n");
-        } finally {
-            manager.closePool(poolId);
-        }
-    }
-
-    private void startMigrationAction() {
-        DatabaseConfig sourceConfig;
-        DatabaseConfig targetConfig;
-
-        try {
-            sourceConfig = buildDatabaseConfig(true);
-            targetConfig = buildDatabaseConfig(false);
-        } catch (IllegalArgumentException e) {
-            JOptionPane.showMessageDialog(this, e.getMessage(), "Lỗi cấu hình", JOptionPane.ERROR_MESSAGE);
-            return;
-        }
-
-        // 1. Khóa nút đềEtránh bấm nhiều lần tạo ra nhiều luồng
-        enableStartButton(false);
-        progressBar.setValue(0);
-        logArea.setText(""); // Xóa log cũ
-
-        appendLog("Khởi tạo luồng nền (Background Worker)...");
-
-        boolean isStructureOnly = optStructureOnly.isSelected();
-        boolean isDataOnly = optDataOnly.isSelected();
-        boolean truncateTarget = chkTruncateTarget.isSelected();
-        boolean copyNewOnly = chkCopyNewOnly.isSelected();
-        Integer limitRows;
-
-        try {
-            limitRows = parseLimitRows();
-        } catch (IllegalArgumentException e) {
-            enableStartButton(true);
-            JOptionPane.showMessageDialog(this, e.getMessage(), "Lỗi cấu hình", JOptionPane.ERROR_MESSAGE);
-            return;
-        }
-
-        Set<String> includeTables = parseCsvTableSet(includeTablesField.getText());
-        Set<String> excludeTables = parseCsvTableSet(excludeTablesField.getText());
-        Set<String> includeViews  = parseCsvTableSet(includeViewsField.getText());
-        Set<String> excludeViews  = parseCsvTableSet(excludeViewsField.getText());
-
-        String sourceSchema = resolveDefaultSchema(sourceConfig);
-        String targetSchema = resolveDefaultSchema(targetConfig);
-
-        // 2. Khởi tạo Worker
-        MigrationWorker worker = new MigrationWorker(
-            this,
-            isStructureOnly,
-            isDataOnly,
-            sourceConfig,
-            targetConfig,
-            sourceSchema,
-            targetSchema,
-            1000,
-            truncateTarget,
-            copyNewOnly,
-            limitRows,
-            includeTables,
-            excludeTables,
-            chkMigrateSequences.isSelected(),
-            chkMigrateIndexes.isSelected(),
-            chkMigrateFunctions.isSelected(),
-            chkMigrateTriggers.isSelected(),
-            includeViews,
-            excludeViews
-        );
-
-        // 3. Lắng nghe sự thay đổi của tiến trình (Progress) đềEcập nhật thanh JProgressBar
-        worker.addPropertyChangeListener(evt -> {
-            if ("progress".equals(evt.getPropertyName())) {
-                int progress = (Integer) evt.getNewValue();
-                progressBar.setValue(progress);
-            }
-        });
-
-        // 4. THỰC THI (Bắt đầu chạy doInBackground ềEmột thread khác)
-        worker.execute();
-    }
-
-    private DatabaseConfig buildDatabaseConfig(boolean isSource) {
-        String selectedType = isSource
-                ? (String) sourceDbTypeCombo.getSelectedItem()
-                : (String) targetDbTypeCombo.getSelectedItem();
-
-        DatabaseType dbType = parseDatabaseType(selectedType);
-        String host = getRequiredText(isSource ? sourceHostField : targetHostField, "Host");
-        String portRaw = getRequiredText(isSource ? sourcePortField : targetPortField, "Port");
-        String dbName = getRequiredText(isSource ? sourceDbNameField : targetDbNameField, "DB Name / SID");
-        String username = getRequiredText(isSource ? sourceUserField : targetUserField, "Username");
-        String password = new String(isSource ? sourcePassField.getPassword() : targetPassField.getPassword());
-
-        int port;
-        try {
-            port = Integer.parseInt(portRaw.trim());
-        } catch (NumberFormatException ex) {
-            throw new IllegalArgumentException("Port không hợp lệ " + portRaw);
-        }
-
-        return new DatabaseConfig(dbType, host, port, dbName, username, password);
-    }
-
-    private static DatabaseType parseDatabaseType(String selectedType) {
-        if (selectedType == null) {
-            throw new IllegalArgumentException("Database Type không được để trống.");
-        }
-
-        if ("Oracle".equalsIgnoreCase(selectedType)) {
-            return DatabaseType.ORACLE;
-        }
-        if ("PostgreSQL".equalsIgnoreCase(selectedType)) {
-            return DatabaseType.POSTGRESQL;
-        }
-
-        throw new IllegalArgumentException("Database Type chưa được hỗ trợ: " + selectedType);
-    }
-
-    private static String resolveDefaultSchema(DatabaseConfig config) {
-        if (config.getType() == DatabaseType.ORACLE) {
-            return config.getUsername().toUpperCase(Locale.ROOT);
-        }
-        return "public";
-    }
-
-    private static String getRequiredText(JTextField field, String label) {
-        String value = field.getText();
-        if (value == null || value.isBlank()) {
-            throw new IllegalArgumentException(label + " không được để trống.");
-        }
-        return value.trim();
-    }
-
-    private Integer parseLimitRows() {
-        String raw = limitDataField.getText();
-        if (raw == null || raw.isBlank()) {
-            return null;
-        }
-
-        try {
-            int parsed = Integer.parseInt(raw.trim());
-            if (parsed < 0) {
-                throw new IllegalArgumentException("Limit phải >= 0. Dùng 0 để copy toàn bộ");
-            }
-            return parsed == 0 ? null : parsed;
-        } catch (NumberFormatException e) {
-            throw new IllegalArgumentException("Limit không hợp lệ " + raw);
-        }
-    }
-
-    private static Set<String> parseCsvTableSet(String raw) {
-        Set<String> parsed = new LinkedHashSet<>();
-        if (raw == null || raw.isBlank()) {
-            return parsed;
-        }
-
-        String[] parts = raw.split(",");
-        for (String part : parts) {
-            if (part == null) {
-                continue;
-            }
-            String value = part.trim();
-            if (value.isEmpty()) {
-                continue;
-            }
-            parsed.add(value.toUpperCase(Locale.ROOT));
-        }
-        return parsed;
-    }
-
     /**
-     * Hàm tiện ích để ghi log ra màn hình
+     * Tạo một row gồm label + input component, stretch để fill chiều rộng.
+     * Dùng GridLayout 2 cột (label 150px, field stretch).
      */
-    public void appendLog(String message) {
-        SwingUtilities.invokeLater(() -> {
-            logArea.append(message + "\n");
-            // Tự động cuộn xuống dòng cuối cùng
-            logArea.setCaretPosition(logArea.getDocument().getLength());
-        });
+    private JPanel makeLabeledRow(String labelText, JComponent field) {
+        JPanel row = new JPanel(new GridLayout(1, 2, 8, 0));
+        JLabel label = new JLabel(labelText);
+        label.setPreferredSize(new Dimension(150, 22));
+        row.add(label);
+        row.add(field);
+        return row;
     }
 
-    // --- MAIN METHOD ---
+    private JPanel makeLabeledRow(String labelText, JComboBox<String> combo) {
+        return makeLabeledRow(labelText, (JComponent) combo);
+    }
+
+    // --- MAIN ---
     public static void main(String[] args) {
-        // Thiết lập giao diện hềEthống (Native Look and Feel) cho đẹp hơn
         try {
             UIManager.setLookAndFeel(UIManager.getSystemLookAndFeelClassName());
-        } catch (ClassNotFoundException | InstantiationException | IllegalAccessException | UnsupportedLookAndFeelException e) {
-            System.err.println("Không thể áp dụng Look and Feel hệ thống: " + e.getMessage());
+        } catch (ClassNotFoundException | InstantiationException
+                | IllegalAccessException | UnsupportedLookAndFeelException e) {
+            System.err.println("Khong the dat LookAndFeel: " + e.getMessage());
         }
-
-        SwingUtilities.invokeLater(() -> {
-            new MigrationAppUI().setVisible(true);
-        });
+        SwingUtilities.invokeLater(() -> new MigrationAppUI().setVisible(true));
     }
 }

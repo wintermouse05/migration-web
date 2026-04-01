@@ -37,7 +37,7 @@ public class MigrationRetryPolicy {
                 getEnvAsInt("MIGRATION_MAX_ATTEMPTS", 3),
                 getEnvAsLong("MIGRATION_RETRY_DELAY_MS", 2000L),
                 getEnvAsDouble("MIGRATION_RETRY_BACKOFF_MULTIPLIER", 2.0),
-                getEnvAsBoolean("MIGRATION_ENABLE_RESUME", true),
+                getEnvAsBoolean("MIGRATION_ENABLE_RESUME", false),
                 getEnv("MIGRATION_RESUME_STATE_FILE", ".migration-resume.properties"),
                 getEnvAsBoolean("MIGRATION_RESET_RESUME_STATE", false)
         );

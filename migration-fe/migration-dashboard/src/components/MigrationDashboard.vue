@@ -36,6 +36,8 @@
     <MigrationOptions
       v-model:migration-mode="migrationMode"
       v-model:options="options"
+      v-model:retry="retry"
+      v-model:resume="resume"
     />
 
     <section class="action-row">
@@ -104,6 +106,19 @@ const options = ref({
   replaceExistingViews: false,
   includeViewsCsv: '',
   excludeViewsCsv: ''
+});
+
+const retry = ref({
+  enabled: false,
+  maxAttempts: 3,
+  initialDelayMs: 2000,
+  backoffMultiplier: 2.0
+});
+
+const resume = ref({
+  enabled: false,
+  stateFile: '.migration-resume.properties',
+  reset: false
 });
 
 const sourceTestState = ref({ status: 'idle', message: '' });
@@ -234,7 +249,9 @@ const startMigration = async () => {
     target: { ...targetDb.value },
     structureOnly: migrationMode.value === 'STRUCTURE_ONLY',
     dataOnly: migrationMode.value === 'DATA_ONLY',
-    options: { ...options.value }
+    options: { ...options.value },
+    retry: { ...retry.value },
+    resume: { ...resume.value }
   };
 
   try {

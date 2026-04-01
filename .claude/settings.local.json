@@ -29,7 +29,23 @@
       "Bash(grep -vE '^\\\\d+:\\\\s*//')",
       "Bash(grep -n \"$sqlrewrite\\\\|$replace\\\\|$remove\\\\|s/\\\\|tr/\" \"C:\\\\Users\\\\dongdd\\\\Documents\\\\Development\\\\migration-web\\\\ora2pg\\\\lib\\\\Ora2Pg\\\\PLSQL.pm\")",
       "Bash(grep -n \"$sql_rewrite\\\\|$replace\\\\|s/\\\\|tr/\" \"C:\\\\Users\\\\dongdd\\\\Documents\\\\Development\\\\migration-web\\\\ora2pg\\\\lib\\\\Ora2Pg\\\\Oracle.pm\")",
-      "Bash(grep \"s/\\\\|s///\")"
+      "Bash(grep \"s/\\\\|s///\")",
+      "Bash(dir /s /b /ad \"c:\\\\Users\\\\dongdd\\\\Documents\\\\Development\\\\migration-web\\\\*ora2pg*\")",
+      "Bash(dir /s /b \"c:\\\\Users\\\\dongdd\\\\Documents\\\\Development\\\\migration-web\\\\*.pm\")",
+      "Bash(dir /s /b \"c:\\\\Users\\\\dongdd\\\\Documents\\\\Development\\\\migration-web\\\\*regex*\")",
+      "Bash(grep -vE \"\\\\.\\(jar|class|pom|properties|xml|md|txt|lock|json\\)$\")",
+      "Bash(.mvnw.cmd compile:*)",
+      "Bash(python3 -c \":*)",
+      "Bash(python -c \":*)",
+      "Bash(powershell -Command \"Get-Content ''C:\\\\Users\\\\dongdd\\\\Documents\\\\Development\\\\migration-web\\\\migration-db-web\\\\src\\\\main\\\\java\\\\org\\\\example\\\\migrationdbweb\\\\migratetool\\\\MigrationWorker.java'' -Encoding UTF8 | Select-Object -Index \\(439..444\\)\")",
+      "Bash(Out-Null)",
+      "Bash(powershell -Command \"\\(Get-Content ''''C:\\\\Users\\\\dongdd\\\\Documents\\\\Development\\\\migration-web\\\\migration-db-web\\\\src\\\\main\\\\java\\\\org\\\\example\\\\migrationdbweb\\\\migratetool\\\\MigrationWorker.java'''' -Encoding UTF8\\)[443]\")",
+      "Bash(./mvnw compile:*)",
+      "Bash(node -e \":*)",
+      "Bash(cmd /c \"mvnw.cmd compile 2>&1\")",
+      "Bash(cmd.exe /c \"mvnw.cmd compile 2>&1\")",
+      "Bash(powershell -Command \"cd ''c:/Users/dongdd/Documents/Development/migration-web/migration-db-web''; ./mvnw.cmd compile 2>&1 | Select-Object -Last 30\")",
+      "Bash(powershell -Command \"cd ''c:/Users/dongdd/Documents/Development/migration-web/migration-db-web''; ./mvnw.cmd clean compile 2>&1 | Select-Object -Last 40\")"
     ]
   }
 }
