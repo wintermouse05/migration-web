@@ -497,7 +497,7 @@ public abstract class DirectionalMigration {
             allTables.add(metadataExtractor.extractTableDefinition(sourceConn, sourceSchema, tableName));
         }
 
-        return allTables;
+        return TableDependencySortUtil.sortByForeignKeyDependency(allTables);
     }
 
     private static List<String> applyTableFilters(

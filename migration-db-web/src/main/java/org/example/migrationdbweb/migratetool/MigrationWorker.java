@@ -206,6 +206,8 @@ public class MigrationWorker extends SwingWorker<Void, String> {
                 SqlDialect sourceDialect = DialectFactory.getDialect(sourceConfig.getType());
                 SqlDialect targetDialect = DialectFactory.getDialect(targetConfig.getType());
                 allTables = deduplicateTablesForTarget(allTables, targetDialect);
+                allTables = TableDependencySortUtil.sortByForeignKeyDependency(allTables);
+                publish("Da sap xep thu tu bang theo phu thuoc FK (parent truoc, child sau).");
                 totalTables = allTables.size();
 
                 if (totalTables == 0) {
@@ -1175,21 +1177,33 @@ public class MigrationWorker extends SwingWorker<Void, String> {
                         continue;
                     }
 
-                    // 4. Execute (replace existing)
-                    // Schema-qualify đềEtránh drop nhầm view ềEschema khác
-                    String qualifiedViewName = vd.getTargetSchema() != null && !vd.getTargetSchema().isBlank()
-                            ? targetDialect.quoteIdentifier(vd.getTargetSchema())
-                                    + "." + targetDialect.quoteIdentifier(vd.getViewName())
-                            : targetDialect.quoteIdentifier(vd.getViewName());
-                    String dropSql = "DROP VIEW IF EXISTS " + qualifiedViewName;
-                    try {
-                        stmt.execute(dropSql);
-                    } catch (SQLException ignored) {
-                        // ignore if not exists
+                    // 4. Execute — honor replaceExistingViews selection from UI.
+                    if (replaceExistingViews) {
+                        // Schema-qualify to avoid dropping a view in another schema.
+                        String qualifiedViewName = targetSchema != null && !targetSchema.isBlank()
+                                ? targetDialect.quoteIdentifier(targetSchema)
+                                        + "." + targetDialect.quoteIdentifier(vd.getViewName())
+                                : targetDialect.quoteIdentifier(vd.getViewName());
+                        String dropSql = "DROP VIEW IF EXISTS " + qualifiedViewName;
+                        try {
+                            stmt.execute(dropSql);
+                        } catch (SQLException ignored) {
+                            // ignore if not exists
+                        }
+                        stmt.execute(normalizeSqlForJdbc(createSql));
+                        publish("  -> Da tao view: " + vd.getViewName());
+                    } else {
+                        try {
+                            stmt.execute(normalizeSqlForJdbc(createSql));
+                            publish("  -> Da tao view: " + vd.getViewName());
+                        } catch (SQLException e) {
+                            if (isViewAlreadyExistsError(e)) {
+                                publish("  -> Bo qua view da ton tai: " + vd.getViewName());
+                            } else {
+                                throw e;
+                            }
+                        }
                     }
-
-                    stmt.execute(normalizeSqlForJdbc(createSql));
-                    publish("  -> Da tao view: " + vd.getViewName());
 
                 } catch (SQLException e) {
                     publish("  -> LOI tao view " + vd.getViewName() + ": " + e.getMessage());
@@ -1308,6 +1322,15 @@ public class MigrationWorker extends SwingWorker<Void, String> {
         return "42P07".equals(sqlState)   // PostgreSQL
                 || message.contains("already exists")
                 || message.contains("duplicate key");
+    }
+
+    private static boolean isViewAlreadyExistsError(SQLException e) {
+        if (e == null) return false;
+        String sqlState = e.getSQLState();
+        String message = e.getMessage() == null ? "" : e.getMessage().toLowerCase(Locale.ROOT);
+        return "42P06".equals(sqlState)
+                || (message.contains("already exists") && message.contains("view"))
+                || message.contains("ora-00955");
     }
 
     /**

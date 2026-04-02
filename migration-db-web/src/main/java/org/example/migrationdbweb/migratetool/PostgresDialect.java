@@ -7,6 +7,15 @@ import java.util.Locale;
 
 public class PostgresDialect implements SqlDialect {
     @Override
+    public String quoteIdentifier(String identifier) {
+        if (identifier == null) {
+            return "\"\"";
+        }
+        String normalized = identifier.trim().toLowerCase(Locale.ROOT);
+        return "\"" + normalized.replace("\"", "\"\"") + "\"";
+    }
+
+    @Override
     public String mapDataType(ColumnDefinition columnDefinition) {
         if (columnDefinition.isAutoIncrement()) {
             if (columnDefinition.getJdbcType() == Types.BIGINT || isOracleNumberType(columnDefinition)) {
@@ -346,6 +355,18 @@ public class PostgresDialect implements SqlDialect {
             functionBody = fn.getFunctionBody();
         }
 
+        // Strip any existing $$...$$ dollar-quoting from the body.
+        // Oracle function bodies from USER_SOURCE may use $$ delimiters.
+        // Since we wrap the body in our own $$...$$ below, keeping the
+        // original delimiters would produce malformed SQL like:
+        //   AS $$ <body containing $$...$$> $$ LANGUAGE plpgsql;
+        if (functionBody != null) {
+            functionBody = stripDollarQuoting(functionBody);
+            if (fn.getSourceDialect() == DatabaseType.ORACLE) {
+                functionBody = normalizeOracleRoutineBodyForPostgres(functionBody);
+            }
+        }
+
         StringBuilder sb = new StringBuilder();
 
         if (fn.isProcedure()) {
@@ -362,8 +383,15 @@ public class PostgresDialect implements SqlDialect {
         for (int i = 0; i < args.size(); i++) {
             if (i > 0) sb.append(", ");
             FunctionDefinition.FunctionArgument arg = args.get(i);
+            if (arg.getMode() != null) {
+                switch (arg.getMode()) {
+                    case OUT -> sb.append("OUT ");
+                    case INOUT -> sb.append("INOUT ");
+                    default -> sb.append("IN ");
+                }
+            }
             if (arg.getName() != null && !arg.getName().isBlank()) {
-                sb.append(arg.getName()).append(" ");
+                sb.append(arg.getName().toLowerCase(Locale.ROOT)).append(" ");
             }
             sb.append(mapOracleTypeToPostgres(arg.getDataType()));
         }
@@ -531,7 +559,10 @@ public class PostgresDialect implements SqlDialect {
      */
     private static int findKeywordEnd(String s, int start, String kwType) {
         if (kwType.equals("from")) {
-            return start + 4; // "from" = 4 chars
+            int end = start + 4; // skip "from" (4 chars)
+            // Skip trailing whitespace so the space before the table name is preserved in the result
+            while (end < s.length() && Character.isWhitespace(s.charAt(end))) end++;
+            return end;
         }
         // JOIN variants: INNER JOIN, LEFT JOIN, LEFT OUTER JOIN, CROSS JOIN, NATURAL JOIN ...
         int pos = start + 4; // skip "join" (4 chars), pos now at the space after "join"
@@ -658,7 +689,8 @@ public class PostgresDialect implements SqlDialect {
         // Đọc từ đầu tiên
         int nameStart = pos;
         while (pos < len && isIdentChar(ref.charAt(pos))) pos++;
-        String firstWord = ref.substring(nameStart, pos).toLowerCase();
+        String firstWordRaw = ref.substring(nameStart, pos);
+        String firstWord = firstWordRaw.toLowerCase(Locale.ROOT);
 
         // Nếu có dấu . ngay sau → schema.table đã qualified
         if (pos < len && ref.charAt(pos) == '.') {
@@ -682,7 +714,7 @@ public class PostgresDialect implements SqlDialect {
         String aliasSuffix = aliasEnd < len ? ref.substring(aliasEnd) : "";
 
         // Đây là bare table name → qualify
-        return schema + "." + firstWord + aliasSuffix;
+        return schema + "." + firstWordRaw + aliasSuffix;
     }
 
     /**
@@ -744,29 +776,23 @@ public class PostgresDialect implements SqlDialect {
      *   CREATE OR REPLACE FUNCTION name...AS...BEGIN...END;
      *   CREATE OR REPLACE PROCEDURE name...IS...BEGIN...END;
      *   FUNCTION name...AS...BEGIN...END;  (no CREATE)
+     *
+     * The AS/IS delimiter must appear OUTSIDE string literals to be valid.
+     * For example, VARCHAR2(10 AS counter) contains AS in a string literal
+     * and must NOT be treated as the header/body delimiter.
      */
     private static String stripOracleCreateLine(String body) {
         if (body == null || body.isBlank()) return body;
 
-        // Try to find "AS" or "IS" — the delimiter between header and body in Oracle
-        int asPos = indexOfWord(body, "AS", 0);
-        int isPos = indexOfWord(body, "IS", 0);
-
-        int delimPos = -1;
-        String delim = null;
-        if (asPos >= 0 && (isPos < 0 || asPos < isPos)) {
-            delimPos = asPos;
-            delim = "AS";
-        } else if (isPos >= 0) {
-            delimPos = isPos;
-            delim = "IS";
-        }
-
+        // Find AS/IS that is the actual header/body delimiter (not inside a string literal).
+        // In Oracle, this delimiter is always followed by whitespace and then the PL/SQL body.
+        int delimPos = findHeaderBodyDelimiter(body);
         if (delimPos < 0) {
-            // No AS/IS found — try to strip "CREATE OR REPLACE FUNCTION/PROCEDURE name" prefix only
+            // No AS/IS found outside string literals — fall back to stripping CREATE prefix
             return stripCreatePrefix(body);
         }
 
+        String delim = body.substring(delimPos, delimPos + 2).trim();
         // Return everything after AS/IS (skip the delimiter itself and any whitespace)
         String after = body.substring(delimPos + delim.length()).replaceFirst("^\\s+", "");
         // Strip leading semicolon if present (Oracle sometimes puts ; after AS keyword)
@@ -774,6 +800,132 @@ public class PostgresDialect implements SqlDialect {
             after = after.substring(1).replaceFirst("^\\s+", "");
         }
         return after;
+    }
+
+    /**
+     * Find the position of the AS or IS keyword that separates the Oracle function/procedure
+     * header from its body. This must be OUTSIDE string literals.
+     *
+     * Strategy: scan for the first " AS " or " IS " (word-bounded) that is NOT inside
+     * a single-quoted string literal. Oracle uses single quotes for strings, and '' is
+     * an escaped single quote within a string.
+     */
+    private static int findHeaderBodyDelimiter(String body) {
+        int len = body.length();
+
+        for (int i = 0; i < len; i++) {
+            char c = body.charAt(i);
+
+            // Single-quote: skip the entire string literal
+            if (c == '\'') {
+                i++;
+                while (i < len) {
+                    if (body.charAt(i) == '\'') {
+                        // '' = escaped quote, skip both
+                        if (i + 1 < len && body.charAt(i + 1) == '\'') {
+                            i += 2;
+                        } else {
+                            i++; // end of string
+                            break;
+                        }
+                    } else {
+                        i++;
+                    }
+                }
+                continue;
+            }
+
+            // Check for "AS" or "IS" at current position
+            int remaining = len - i;
+            if (remaining >= 2) {
+                // Check for "AS" — must be word-bounded
+                if (body.charAt(i) == 'A' && body.charAt(i + 1) == 'S') {
+                    boolean validBefore = (i == 0) || !isIdentChar(body.charAt(i - 1));
+                    boolean validAfter  = (i + 2 >= len) || !isIdentChar(body.charAt(i + 2));
+                    if (validBefore && validAfter) {
+                        return i; // "AS" found — this is the header/body delimiter
+                    }
+                }
+                // Check for "IS" — must be word-bounded
+                if (body.charAt(i) == 'I' && body.charAt(i + 1) == 'S') {
+                    // Guard against matching the "IS" inside "RETURN ... IS":
+                    //   "RETURN VARCHAR2 IS" — the IS here is inside the return-type line,
+                    //   not the header/body delimiter. Skip it if preceded by RETURN/RETURNING.
+                    //   VARCHAR2 can be up to 4000 chars, so look back 30 chars to safely
+                    //   capture "RETURN" regardless of how long the type name is.
+                    if (i >= 30) {
+                        String prefix = body.substring(i - 30, i).toUpperCase(Locale.ROOT);
+                        // Strip anything that looks like type declarations (identifiers, parens,
+                        // commas, digits) to isolate the SQL keyword at the end.
+                        String stripped = prefix.replaceAll("[A-Z0-9_().,\"\\s]+$", "");
+                        if ("RETURN".equals(stripped) || "RETURNING".equals(stripped)) {
+                            continue; // skip — this IS is part of RETURN type, not the delimiter
+                        }
+                    }
+                    boolean validBefore = (i == 0) || !isIdentChar(body.charAt(i - 1));
+                    boolean validAfter  = (i + 2 >= len) || !isIdentChar(body.charAt(i + 2));
+                    if (validBefore && validAfter) {
+                        return i; // "IS" found — this is the header/body delimiter
+                    }
+                }
+            }
+        }
+        return -1; // not found
+    }
+
+    /**
+     * Remove dollar-quote delimiters ($$...$$ or $tag$...$tag$) from a string.
+     * Oracle function bodies from USER_SOURCE may use $$ delimiters.
+     * Since we wrap the body in our own $$...$$ below, we must strip any
+     * existing delimiters to avoid producing:
+     *   AS $$ ... $$ ... $$ LANGUAGE plpgsql;
+     */
+    private static String stripDollarQuoting(String body) {
+        if (body == null || body.isBlank()) return body;
+
+        // Simple $$...$$  (no tag)
+        if (body.startsWith("$$") && body.endsWith("$$") && body.length() >= 4) {
+            return body.substring(2, body.length() - 2).trim();
+        }
+
+        // Dollar-quoted with a tag: $tag$...$tag$
+        // Extract the tag, then strip matching delimiters
+        for (int i = 0; i < body.length(); i++) {
+            if (body.charAt(i) != '$') continue;
+            int tagEnd = body.indexOf('$', i + 1);
+            if (tagEnd <= i + 1) continue;
+            String tag = body.substring(i + 1, tagEnd);
+            if (tag.isEmpty()) continue; // empty tag not valid
+            String closing = "$" + tag + "$";
+            int bodyEnd = body.lastIndexOf(closing);
+            if (bodyEnd > tagEnd) {
+                // Found matching closing delimiter
+                String inner = body.substring(tagEnd + 1, bodyEnd);
+                // Guard against $$ appearing inside the body (unrelated)
+                if (inner.contains("$$")) {
+                    // Body contains bare $$ — strip only the outer delimiters
+                    // This is the problematic case: body starts with $$ but also has $$ inside
+                    // We use a simple approach: strip first and last occurrence
+                    return stripFirstAndLastDollarPair(body);
+                }
+                return inner.trim();
+            }
+        }
+
+        return body;
+    }
+
+    /**
+     * Fallback: strip the first $$ and the last $$ from the body.
+     * Used when the body contains bare $$ that can't be reliably paired.
+     */
+    private static String stripFirstAndLastDollarPair(String body) {
+        int first = body.indexOf("$$");
+        int last = body.lastIndexOf("$$");
+        if (first >= 0 && last > first) {
+            return body.substring(first + 2, last).trim();
+        }
+        return body;
     }
 
     private static String stripCreatePrefix(String body) {
@@ -788,6 +940,99 @@ public class PostgresDialect implements SqlDialect {
             return body.substring(endOfFirstLine).replaceFirst("^\\s+", "");
         }
         return body;
+    }
+
+    /**
+     * Oracle routine body có thể chứa declaration block trước BEGIN mà không có DECLARE.
+     * PostgreSQL yêu cầu declaration phải nằm dưới từ khóa DECLARE và dùng type hợp lệ của PG.
+     */
+    private static String normalizeOracleRoutineBodyForPostgres(String body) {
+        if (body == null || body.isBlank()) return body;
+
+        String normalized = body
+                .replace("\r\n", "\n")
+                .replace("\r", "\n")
+                .replaceAll("(?m)^\\s*/\\s*$", "")
+                .trim();
+
+        int beginIdx = indexOfWordOutsideSingleQuotes(normalized, "BEGIN");
+        if (beginIdx < 0) {
+            return convertOracleDeclarationTypes(normalized);
+        }
+
+        String beforeBegin = normalized.substring(0, beginIdx).trim();
+        String fromBegin = normalized.substring(beginIdx).trim();
+        if (beforeBegin.isBlank()) {
+            return fromBegin;
+        }
+
+        String declarations = beforeBegin;
+        if (declarations.toUpperCase(Locale.ROOT).startsWith("DECLARE")) {
+            declarations = declarations.substring("DECLARE".length()).trim();
+        }
+
+        declarations = convertOracleDeclarationTypes(declarations).trim();
+        if (declarations.isBlank()) {
+            return fromBegin;
+        }
+
+        return "DECLARE\n" + declarations + "\n" + fromBegin;
+    }
+
+    private static String convertOracleDeclarationTypes(String declarations) {
+        if (declarations == null || declarations.isBlank()) return declarations;
+
+        String converted = declarations;
+        converted = converted.replaceAll("(?im)\\bNVARCHAR2\\s*\\([^)]*\\)", "TEXT");
+        converted = converted.replaceAll("(?im)\\bVARCHAR2\\s*\\([^)]*\\)", "TEXT");
+        converted = converted.replaceAll("(?im)\\bNVARCHAR2\\b", "TEXT");
+        converted = converted.replaceAll("(?im)\\bVARCHAR2\\b", "TEXT");
+        converted = converted.replaceAll("(?im)\\bNUMBER\\s*\\([^)]*\\)", "NUMERIC");
+        converted = converted.replaceAll("(?im)\\bNUMBER\\b", "NUMERIC");
+        converted = converted.replaceAll("(?im)\\bPLS_INTEGER\\b", "INTEGER");
+        converted = converted.replaceAll("(?im)\\bBINARY_INTEGER\\b", "INTEGER");
+        converted = converted.replaceAll("(?im)\\bCLOB\\b", "TEXT");
+        converted = converted.replaceAll("(?im)\\bNCLOB\\b", "TEXT");
+        converted = converted.replaceAll("(?im)\\bBLOB\\b", "BYTEA");
+        converted = converted.replaceAll("(?im)\\bRAW\\b", "BYTEA");
+        converted = converted.replaceAll("(?im)\\bDATE\\b", "TIMESTAMP");
+        return converted;
+    }
+
+    private static int indexOfWordOutsideSingleQuotes(String text, String word) {
+        if (text == null || text.isEmpty() || word == null || word.isEmpty()) {
+            return -1;
+        }
+
+        int len = text.length();
+        int wLen = word.length();
+        boolean inString = false;
+
+        for (int i = 0; i <= len - wLen; i++) {
+            char c = text.charAt(i);
+            if (c == '\'') {
+                if (inString && i + 1 < len && text.charAt(i + 1) == '\'') {
+                    i++;
+                    continue;
+                }
+                inString = !inString;
+                continue;
+            }
+
+            if (inString) continue;
+
+            if (text.regionMatches(true, i, word, 0, wLen)) {
+                int before = i - 1;
+                int after = i + wLen;
+                boolean validBefore = before < 0 || !isIdentChar(text.charAt(before));
+                boolean validAfter = after >= len || !isIdentChar(text.charAt(after));
+                if (validBefore && validAfter) {
+                    return i;
+                }
+            }
+        }
+
+        return -1;
     }
 
     private static int skipOptionalAlias(String s, int pos) {

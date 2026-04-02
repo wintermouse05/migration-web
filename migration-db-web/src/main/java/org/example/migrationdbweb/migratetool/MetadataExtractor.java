@@ -13,6 +13,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 
 public class MetadataExtractor {
@@ -83,7 +84,88 @@ public class MetadataExtractor {
 
             }
         }
+
+        // PostgreSQL drivers can occasionally return no imported keys via DatabaseMetaData
+        // (especially with mixed-case/quoted schema names). Fall back to information_schema.
+        if (tableDef.getForeignKeys().isEmpty() && isPostgreSqlConnection(conn)) {
+            for (ForeignKeyDefinition fkDef : loadPostgresForeignKeysFromInformationSchema(conn, schema, tableName)) {
+                tableDef.addForeignKey(fkDef);
+            }
+        }
         return tableDef;
+    }
+
+    private static boolean isPostgreSqlConnection(Connection conn) {
+        if (conn == null) {
+            return false;
+        }
+        try {
+            return conn.getMetaData().getDatabaseProductName().toLowerCase(Locale.ROOT).contains("postgresql");
+        } catch (SQLException e) {
+            return false;
+        }
+    }
+
+    private static List<ForeignKeyDefinition> loadPostgresForeignKeysFromInformationSchema(
+            Connection conn,
+            String schema,
+            String tableName
+    ) throws SQLException {
+        if (schema == null || schema.isBlank() || tableName == null || tableName.isBlank()) {
+            return Collections.emptyList();
+        }
+
+        String sql = """
+            SELECT
+                tc.constraint_name,
+                kcu.column_name,
+                ccu.table_name AS target_table_name,
+                ccu.column_name AS target_column_name
+            FROM information_schema.table_constraints tc
+            JOIN information_schema.key_column_usage kcu
+              ON tc.constraint_name = kcu.constraint_name
+             AND tc.table_schema = kcu.table_schema
+            JOIN information_schema.constraint_column_usage ccu
+              ON tc.constraint_name = ccu.constraint_name
+             AND tc.table_schema = ccu.constraint_schema
+            WHERE tc.constraint_type = 'FOREIGN KEY'
+              AND tc.table_schema = ?
+              AND tc.table_name = ?
+            ORDER BY tc.constraint_name, kcu.ordinal_position
+            """;
+
+        List<ForeignKeyDefinition> foreignKeys = new ArrayList<>();
+        Set<String> seen = new HashSet<>();
+
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setString(1, schema);
+            ps.setString(2, tableName);
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    String fkName = rs.getString("constraint_name");
+                    String fkColumnName = rs.getString("column_name");
+                    String targetTableName = rs.getString("target_table_name");
+                    String targetColumnName = rs.getString("target_column_name");
+
+                    String key = (Objects.toString(fkName, "") + "|"
+                            + Objects.toString(fkColumnName, "") + "|"
+                            + Objects.toString(targetTableName, "") + "|"
+                            + Objects.toString(targetColumnName, ""))
+                            .toUpperCase(Locale.ROOT);
+
+                    if (seen.add(key)) {
+                        foreignKeys.add(new ForeignKeyDefinition(
+                                fkName,
+                                fkColumnName,
+                                targetTableName,
+                                targetColumnName
+                        ));
+                    }
+                }
+            }
+        }
+
+        return foreignKeys;
     }
 
     // ─────────────────────────────────────────────────────────────

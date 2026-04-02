@@ -215,11 +215,18 @@ public class OracleDialect implements SqlDialect {
             return stmts;
         }
 
+        if (trig.getSourceDialect() == DatabaseType.POSTGRESQL) {
+            body = new PostgresToOracleTransformer().transformTriggerBody(body);
+            for (String warning : PostgresToOracleTransformer.detectUnsupportedFeatures(body)) {
+                System.err.println("  [PG2ORA-TRIGGER-WARN] " + trig.getTriggerName() + ": " + warning);
+            }
+        }
+
         // Ưu tiên dùng DDL gốc đã lưu trong TriggerDefinition (từ MetadataExtractor)
         String ddl = trig.getDdlText();
-        if (ddl == null || ddl.isBlank()) {
+        if (trig.getSourceDialect() == DatabaseType.POSTGRESQL || ddl == null || ddl.isBlank()) {
             // Fallback: build từ TriggerDefinition fields
-            ddl = buildOracleTriggerFromDefinition(trig);
+            ddl = buildOracleTriggerFromDefinition(trig, body);
         } else {
             // DDL gốc có sẵn — chỉ replace schema nếu cần
             if (trig.getSourceSchema() != null && trig.getTargetSchema() != null
@@ -262,7 +269,7 @@ public class OracleDialect implements SqlDialect {
      * Build Oracle trigger DDL từ TriggerDefinition fields.
      * Dùng khi không lấy được full DDL từ Oracle metadata.
      */
-    private String buildOracleTriggerFromDefinition(TriggerDefinition trig) {
+    private String buildOracleTriggerFromDefinition(TriggerDefinition trig, String bodyText) {
         StringBuilder sb = new StringBuilder();
         sb.append("CREATE OR REPLACE TRIGGER ");
         sb.append(quoteIdentifier(trig.getTriggerName()));
@@ -290,13 +297,48 @@ public class OracleDialect implements SqlDialect {
         }
 
         sb.append("\n");
-        sb.append(trig.getTriggerBody());
+        sb.append(bodyText);
 
         return sb.toString();
     }
 
     @Override
     public String buildCreateViewSql(ViewDefinition viewDef) {
+        if (viewDef.getSourceDialect() == DatabaseType.POSTGRESQL) {
+            String select = viewDef.getSelectClause();
+            if (select == null || select.isBlank()) {
+                return null;
+            }
+
+            select = select.trim();
+            if (select.endsWith(";")) {
+                select = select.substring(0, select.length() - 1);
+            }
+
+            PostgresToOracleTransformer transformer = new PostgresToOracleTransformer();
+            select = transformer.transform(select);
+
+            String sourceSchema = viewDef.getSourceSchema();
+            String targetSchema = viewDef.getTargetSchema();
+            if (sourceSchema != null && targetSchema != null
+                    && !sourceSchema.equalsIgnoreCase(targetSchema)) {
+                select = select.replaceAll(
+                        "(?i)" + Pattern.quote(sourceSchema) + "\\.",
+                        targetSchema + "."
+                );
+            }
+
+            StringBuilder sql = new StringBuilder();
+            sql.append("CREATE OR REPLACE VIEW ");
+            sql.append(quoteIdentifier(viewDef.getViewName()));
+            sql.append(" AS\n");
+            sql.append(select);
+            if (viewDef.getCheckOption() != null && !viewDef.getCheckOption().isBlank()) {
+                sql.append("\nWITH ").append(viewDef.getCheckOption()).append(" CHECK OPTION");
+            }
+            return sql.toString();
+        }
+
         // Oracle USER_VIEWS.TEXT chứa "CREATE [OR REPLACE] ... VIEW ... AS SELECT ..."
         // Đã là DDL đầy đủ, chỉ cần xử lý schema replacement + cleanup
         String text = viewDef.getSelectClause();
@@ -337,6 +379,14 @@ public class OracleDialect implements SqlDialect {
 			return stmts;
 		}
 
+        if (fn.getSourceDialect() == DatabaseType.POSTGRESQL) {
+            PostgresToOracleTransformer pgTransformer = new PostgresToOracleTransformer();
+            body = pgTransformer.transform(body);
+            for (String warning : PostgresToOracleTransformer.detectUnsupportedFeatures(body)) {
+                System.err.println("  [PG2ORA-FUNCTION-WARN] " + fn.getFunctionName() + ": " + warning);
+            }
+        }
+
 		StringBuilder sb = new StringBuilder();
 		if (fn.isProcedure()) {
 			sb.append("CREATE OR REPLACE PROCEDURE ");
@@ -350,14 +400,23 @@ public class OracleDialect implements SqlDialect {
 		for (int i = 0; i < args.size(); i++) {
 			if (i > 0) sb.append(", ");
 			FunctionDefinition.FunctionArgument arg = args.get(i);
+            if (arg.getMode() != null) {
+                switch (arg.getMode()) {
+                    case OUT -> sb.append("OUT ");
+                    case INOUT -> sb.append("IN OUT ");
+                    default -> sb.append("IN ");
+                }
+            }
 			if (arg.getName() != null && !arg.getName().isBlank()) {
-				sb.append(arg.getName()).append(" ");
+                sb.append(arg.getName().toUpperCase(Locale.ROOT)).append(" ");
 			}
-			sb.append(arg.getDataType());
+            sb.append(mapPostgresTypeToOracle(arg.getDataType()));
 		}
 		sb.append(")");
 		if (fn.isFunction() && fn.getReturnType() != null) {
-			sb.append(" RETURN ").append(fn.getReturnType());
+            sb.append(" RETURN ").append(mapPostgresTypeToOracle(fn.getReturnType()));
+        } else if (fn.isFunction()) {
+            sb.append(" RETURN VARCHAR2");
 		}
 		sb.append(" AS\n");
 		sb.append(body);
@@ -368,4 +427,45 @@ public class OracleDialect implements SqlDialect {
 		stmts.add(sb.toString());
 		return stmts;
 	}
+
+    private static String mapPostgresTypeToOracle(String dataType) {
+        if (dataType == null || dataType.isBlank()) {
+            return "VARCHAR2";
+        }
+
+        String normalized = dataType.trim().toLowerCase(Locale.ROOT);
+        if (normalized.startsWith("character varying") || normalized.startsWith("varchar")) {
+            java.util.regex.Matcher m = java.util.regex.Pattern
+                    .compile(".*\\((\\d+)\\)")
+                    .matcher(normalized);
+            if (m.matches()) {
+                return "VARCHAR2(" + m.group(1) + ")";
+            }
+            return "VARCHAR2";
+        }
+        if (normalized.startsWith("character") || normalized.startsWith("char")) {
+            java.util.regex.Matcher m = java.util.regex.Pattern
+                    .compile(".*\\((\\d+)\\)")
+                    .matcher(normalized);
+            if (m.matches()) {
+                return "CHAR(" + m.group(1) + ")";
+            }
+            return "CHAR(1)";
+        }
+        if (normalized.equals("text")) return "CLOB";
+        if (normalized.equals("smallint") || normalized.equals("int2")) return "NUMBER(5)";
+        if (normalized.equals("integer") || normalized.equals("int") || normalized.equals("int4")) return "NUMBER(10)";
+        if (normalized.equals("bigint") || normalized.equals("int8")) return "NUMBER(19)";
+        if (normalized.equals("numeric") || normalized.equals("decimal")) return "NUMBER";
+        if (normalized.equals("real") || normalized.equals("float4")) return "BINARY_FLOAT";
+        if (normalized.equals("double precision") || normalized.equals("float8")) return "BINARY_DOUBLE";
+        if (normalized.equals("boolean") || normalized.equals("bool")) return "NUMBER(1)";
+        if (normalized.equals("date")) return "DATE";
+        if (normalized.startsWith("timestamp")) return "TIMESTAMP";
+        if (normalized.equals("bytea")) return "BLOB";
+        if (normalized.equals("json") || normalized.equals("jsonb")) return "CLOB";
+        if (normalized.equals("uuid")) return "VARCHAR2(36)";
+
+        return dataType;
+    }
 	}

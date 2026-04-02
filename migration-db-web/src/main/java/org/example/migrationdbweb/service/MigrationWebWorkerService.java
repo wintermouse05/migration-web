@@ -80,8 +80,8 @@ public class MigrationWebWorkerService {
             try (Connection sourceConn = manager.getConnection(sourcePoolId);
                  Connection targetConn = manager.getConnection(targetPoolId)) {
 
-                String sourceSchema = resolveDefaultSchema(request.getSource());
-                String targetSchema = resolveDefaultSchema(request.getTarget());
+                String sourceSchema = resolveDefaultSchema(request.getSource(), sourceConn);
+                String targetSchema = resolveDefaultSchema(request.getTarget(), targetConn);
 
                 broadcastStatus(6, "RUNNING", "Da ket noi source/target thanh cong.", true);
                 broadcastStatus(8, "RUNNING", "Schema source=" + sourceSchema + " | target=" + targetSchema, true);
@@ -115,12 +115,16 @@ public class MigrationWebWorkerService {
                     broadcastStatus(progress, "RUNNING", "Da doc metadata bang " + tableName + ".", true);
                 }
 
+                final List<TableDefinition> orderedTableDefinitions = org.example.migrationdbweb.migratetool.TableDependencySortUtil
+                    .sortByForeignKeyDependency(tableDefinitions);
+                broadcastStatus(40, "RUNNING", "Da sap xep thu tu migrate theo phu thuoc FK.", true);
+
                 SqlDialect sourceDialect = DialectFactory.getDialect(request.getSource().getType());
                 SqlDialect targetDialect = DialectFactory.getDialect(request.getTarget().getType());
 
                 if (!dataOnly) {
                     broadcastStatus(42, "RUNNING", "Dang tao cau truc bang tren target...", true);
-                    runCreateTablesPhase(targetConn, tableDefinitions, targetDialect);
+                    runCreateTablesPhase(targetConn, orderedTableDefinitions, targetDialect);
                     broadcastStatus(55, "RUNNING", "Hoan tat tao cau truc bang.", true);
                 } else {
                     broadcastStatus(55, "RUNNING", "Bo qua tao cau truc (DATA_ONLY).", true);
@@ -129,7 +133,7 @@ public class MigrationWebWorkerService {
                 if (!structureOnly) {
                     if (options.isTruncate()) {
                         broadcastStatus(58, "RUNNING", "Dang xoa du lieu cu tren target (truncate)...", true);
-                        runTruncatePhase(targetConn, tableDefinitions, targetDialect);
+                        runTruncatePhase(targetConn, orderedTableDefinitions, targetDialect);
                     }
 
                     broadcastStatus(60, "RUNNING", "Dang chuyen du lieu bang...", true);
@@ -158,14 +162,14 @@ public class MigrationWebWorkerService {
                     }
 
                     // ── Migrate each table with retry / resume ────────────────────────
-                    for (int i = 0; i < tableDefinitions.size(); i++) {
+                    for (int i = 0; i < orderedTableDefinitions.size(); i++) {
                         final int tableIndex = i;
-                        TableDefinition table = tableDefinitions.get(i);
+                        TableDefinition table = orderedTableDefinitions.get(i);
 
                         // Skip bảng đã hoàn thành (resume)
                         if (checkpointStore != null && checkpointStore.isTableCompleted(table.getTableName())) {
                             broadcastStatus(
-                                    60 + (int) (((i + 1) * 25.0f) / tableDefinitions.size()),
+                                        60 + (int) (((i + 1) * 25.0f) / orderedTableDefinitions.size()),
                                     "RUNNING",
                                     "Bo qua bang da migrate (resume): " + table.getTableName(),
                                     true
@@ -174,7 +178,7 @@ public class MigrationWebWorkerService {
                         }
 
                         broadcastStatus(
-                                60 + (int) (((i + 1) * 25.0f) / tableDefinitions.size()),
+                                60 + (int) (((i + 1) * 25.0f) / orderedTableDefinitions.size()),
                                 "RUNNING",
                                 "Dang migrate du lieu bang " + table.getTableName() + "...",
                                 true
@@ -186,26 +190,30 @@ public class MigrationWebWorkerService {
                                 table, 1000, limitRows,
                                 options.isCopyNewOnly(),
                                 checkpointStore,
-                                tableDefinitions.size(), i,
+                                orderedTableDefinitions.size(), i,
                                 (tableName, justTransferred, totalTransferred, totalSkipped) -> broadcastStatus(
-                                        Math.min(84, 60 + (int) (((tableIndex + 1) * 25.0f) / tableDefinitions.size())),
+                                    Math.min(84, 60 + (int) (((tableIndex + 1) * 25.0f) / orderedTableDefinitions.size())),
                                         "RUNNING",
                                         "Bang " + tableName + ": copied=" + totalTransferred + ", skipped=" + totalSkipped,
                                         true
                                 )
                         );
 
-                        if (result != null) {
-                            broadcastStatus(
-                                    60 + (int) (((i + 1) * 25.0f) / tableDefinitions.size()),
-                                    "RUNNING",
-                                    "Hoan tat bang " + table.getTableName()
-                                            + " | copied=" + result.getTransferredRows()
-                                            + " | skipped=" + result.getSkippedRows()
-                                            + (result.isLimitReached() ? " | dat nguong limit" : ""),
-                                    true
+                        if (result == null) {
+                            throw new SQLException(
+                                    "Khong the migrate bang " + table.getTableName() + " sau tat ca cac lan retry."
                             );
                         }
+
+                        broadcastStatus(
+                                    60 + (int) (((i + 1) * 25.0f) / orderedTableDefinitions.size()),
+                                "RUNNING",
+                                "Hoan tat bang " + table.getTableName()
+                                        + " | copied=" + result.getTransferredRows()
+                                        + " | skipped=" + result.getSkippedRows()
+                                        + (result.isLimitReached() ? " | dat nguong limit" : ""),
+                                true
+                        );
                     }
                 } else {
                     broadcastStatus(85, "RUNNING", "Bo qua migrate du lieu (STRUCTURE_ONLY).", true);
@@ -213,7 +221,7 @@ public class MigrationWebWorkerService {
 
                 if (!dataOnly) {
                     broadcastStatus(88, "RUNNING", "Dang tao foreign keys...", true);
-                    runAddForeignKeysPhase(targetConn, tableDefinitions, targetDialect);
+                    runAddForeignKeysPhase(targetConn, orderedTableDefinitions, targetDialect);
                     broadcastStatus(90, "RUNNING", "Hoan tat tao foreign keys.", true);
 
                     // ─── PHASE 5: SEQUENCES ──────────────────────────────────────
@@ -225,7 +233,7 @@ public class MigrationWebWorkerService {
                     // ─── PHASE 6: INDEXES ──────────────────────────────────────
                     if (options.isMigrateIndexes()) {
                         runCreateIndexesPhaseWeb(targetConn, sourceConn, sourceSchema, targetSchema,
-                                tableDefinitions, request.getSource().getType(), targetDialect);
+                            orderedTableDefinitions, request.getSource().getType(), targetDialect);
                     }
 
                     // ─── PHASE 7: FUNCTIONS / PROCEDURES ───────────────────────
@@ -237,7 +245,7 @@ public class MigrationWebWorkerService {
                     // ─── PHASE 8: TRIGGERS ────────────────────────────────────
                     if (options.isMigrateTriggers()) {
                         runCreateTriggersPhaseWeb(targetConn, sourceConn, sourceSchema, targetSchema,
-                                tableDefinitions, request.getSource().getType(), targetDialect);
+                            orderedTableDefinitions, request.getSource().getType(), targetDialect);
                     }
                 } else {
                     broadcastStatus(90, "RUNNING", "Bo qua cac buoc cau truc (DATA_ONLY).", true);
@@ -321,10 +329,25 @@ public class MigrationWebWorkerService {
         return new MigrationStatus(progress, status, message, inProgress, System.currentTimeMillis());
     }
 
-    private String resolveDefaultSchema(DatabaseConfig config) {
+    private String resolveDefaultSchema(DatabaseConfig config, Connection conn) {
         if (config.getType() == DatabaseType.ORACLE) {
             return config.getUsername().toUpperCase(Locale.ROOT);
         }
+
+        if (config.getType() == DatabaseType.POSTGRESQL && conn != null) {
+            try (Statement stmt = conn.createStatement();
+                 java.sql.ResultSet rs = stmt.executeQuery("SELECT current_schema()")) {
+                if (rs.next()) {
+                    String schema = rs.getString(1);
+                    if (schema != null && !schema.isBlank()) {
+                        return schema;
+                    }
+                }
+            } catch (SQLException ignored) {
+                // fallback to public
+            }
+        }
+
         return "public";
     }
 
@@ -644,39 +667,28 @@ public class MigrationWebWorkerService {
         if (sourceSchema != null && targetSchema != null
                 && !sourceSchema.equalsIgnoreCase(targetSchema)) {
 
-            // a) Quoted UPPERCASE: "SCOTT"."PRODUCTS" → "public"."products"
-            //    Oracle giữ UPPERCASE trong dấu ngoặc kép. PostgreSQL dùng lowercase.
+            // a) Quoted schema: "SCOTT"."PRODUCTS" → "targetSchema"."PRODUCTS"
+            //    (?i) makes it case-insensitive so it also matches "scott"."products".
             result = result.replaceAll(
-                    "\"\\s*" + Pattern.quote(sourceSchema) + "\\s*\"\\s*\\.\"",
-                    "\"" + targetSchema.toLowerCase() + "\".\""
-            );
-            // Giữ nguyên quoted schema phía sau dấu . : "SCOTT"."PRODUCTS" → "public"."products"
-            // Pattern trên chỉ match "schema." → thay bằng "target."
-            // Tên bảng (identifier) sau dấu . giữ nguyên — sẽ lowercase ở bước tiếp theo
-
-            // b) Unquoted identifier: SCOTT.PRODUCTS → public.products
-            //    Oracle UPPERCASE không quoted, PostgreSQL lowercase
-            result = result.replaceAll(
-                    "(?<![a-zA-Z0-9_'\"])"                                    // không có identifier/quote trước
-                            + Pattern.quote(sourceSchema) + "\\.([a-zA-Z_][a-zA-Z0-9_]*)",  // schema. identifier
-                    targetSchema.toLowerCase() + ".$1"
+                    "(?i)\"\\s*" + Pattern.quote(sourceSchema) + "\\s*\"\\s*\\.\\s*\"([^\"]+)\"\\s*",
+                    "\"" + targetSchema + "\".\"$1\""
             );
 
-            // c) Identifier sau "schema." cần UPPERCASE → lowercase
-            //    "public"."PRODUCTS" → "public"."products"
-            //    PostgreSQL tất cả lowercase, kể cả quoted
+            // b) Unquoted schema: SCOTT.PRODUCTS → public.products
+            //    (?i) makes it case-insensitive so it also matches scott.products.
+            //    Optional spaces around the dot: both "SCOTT.PRODUCTS" and "SCOTT. PRODUCTS" match.
             result = result.replaceAll(
-                    "\"\\s*" + Pattern.quote(targetSchema.toLowerCase()) + "\\s*\"\\s*\\.\\s*\"([^\"]+)\"\\s*",
-                    "\"" + targetSchema.toLowerCase() + "\".\"$1\""
+                    "(?i)"                                              // case-insensitive: match SCOTT or scott
+                            + "(?<![a-zA-Z0-9_'\"])"                     // không có identifier/quote trước
+                            + Pattern.quote(sourceSchema) + "\\s*\\.\\s*" // schema (optional spaces around .)
+                            + "([a-zA-Z_][a-zA-Z0-9_]*)",               // table name giữ nguyên case gốc
+                        targetSchema + ".$1"
             );
 
-            // d) Lowercase source schema trong view body (Oracle lowercase schema)
-            //    Lỗi: "scott.products" không được replace vì sourceSchema = "SCOTT" (UPPERCASE)
-            //    View từ Oracle có thể dùng lowercase "scott.products"
-            //    Replace: scott.products → public.products (case-insensitive)
+                    // c) Normalize quoted schema prefix theo targetSchema hiện tại.
             result = result.replaceAll(
-                    "(?i)" + Pattern.quote(sourceSchema.toLowerCase()) + "\\.([a-zA-Z_][a-zA-Z0-9_]*)",
-                    targetSchema.toLowerCase() + ".$1"
+                    "\"\\s*" + Pattern.quote(targetSchema) + "\\s*\"\\s*\\.\\s*\"([^\"]+)\"\\s*",
+                    "\"" + targetSchema + "\".\"$1\""
             );
         }
 
@@ -695,7 +707,7 @@ public class MigrationWebWorkerService {
             //    không có schema prefix và chưa được xử lý bởi regex ở trên.
             //    Chỉ áp dụng khi Oracle → PostgreSQL và có targetSchema.
             if (targetSchema != null && !targetSchema.isBlank()) {
-                result = PostgresDialect.qualifyUnqualifiedTableReferences(result, targetSchema.toLowerCase());
+                result = PostgresDialect.qualifyUnqualifiedTableReferences(result, targetSchema);
             }
         }
 

@@ -1,12 +1,23 @@
 package org.example.migrationdbweb.migratetool;
 
+import java.sql.BatchUpdateException;
 import java.sql.Connection;
+import java.sql.Date;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
+import java.sql.Time;
+import java.sql.Timestamp;
 import java.sql.Types;
+import java.time.Instant;
+import java.time.LocalDate;
+import java.time.LocalDateTime;
+import java.time.LocalTime;
+import java.time.OffsetDateTime;
+import java.time.ZonedDateTime;
 import java.util.List;
+import java.util.UUID;
 
 public class DataTransferService {
 
@@ -168,6 +179,9 @@ public class DataTransferService {
                     }
 
                     if (existsByPkStmt != null && rowExistsByPrimaryKey(rs, table, existsByPkStmt, pkColumnIndexes)) {
+                        // Resume offset is persisted from totalTransferred, so skipped rows
+                        // must also advance this counter to keep offset aligned.
+                        totalTransferred++;
                         totalSkipped++;
                         continue;
                     }
@@ -179,18 +193,11 @@ public class DataTransferService {
 
                         Object value = rs.getObject(i);
                         if (value == null) {
-                            targetPstmt.setNull(i, jdbcType);
+                            setNullSafely(targetPstmt, i, jdbcType);
                             continue;
                         }
 
-                        switch (jdbcType) {
-                            case Types.TIMESTAMP -> targetPstmt.setTimestamp(i, rs.getTimestamp(i));
-                            case Types.DATE -> targetPstmt.setDate(i, rs.getDate(i));
-                            case Types.TIME -> targetPstmt.setTime(i, rs.getTime(i));
-                            default ->
-                                    // Truyền explicit JDBC type để tránh lỗi Oracle-specific object (vd: oracle.sql.TIMESTAMP)
-                                    targetPstmt.setObject(i, value, jdbcType);
-                        }
+                        bindValueSafely(targetPstmt, i, value, jdbcType, column, table.getTableName());
                     }
 
                     // Đưa lệnh INSERT đã được gán giá trềEvào danh sách chềE(Batch)
@@ -225,7 +232,11 @@ public class DataTransferService {
         } catch (SQLException e) {
             // Rollback nếu có lỗi xảy ra đềEđảm bảo tính toàn vẹn dữ liệu
             targetConn.rollback();
-            System.err.println("Lỗi khi transfer dữ liệu bảng " + table.getTableName() + ". Đã rollback!");
+            System.err.println("Lỗi khi transfer dữ liệu bảng " + table.getTableName()
+                    + ". Đã rollback! SQLState=" + e.getSQLState()
+                    + ", ErrorCode=" + e.getErrorCode()
+                    + ", Message=" + e.getMessage()
+                    + ", Detail=" + buildSqlExceptionDetail(e));
             throw e;
         } finally {
             // Khôi phục trạng thái ban đầu
@@ -259,18 +270,66 @@ public class DataTransferService {
                 }
                 targetConn.rollback();
                 if (!isRetryableException(e) || attempt == attempts) {
+                    String detail = buildSqlExceptionDetail(e);
                     throw new SQLException(
-                            "Khong the execute batch bang " + tableName + " sau " + attempt + " lan thu.",
+                        "Khong the execute batch bang " + tableName + " sau " + attempt + " lan thu. Chi tiet: " + detail,
                             e
                     );
                 }
 
                 long delayMs = retryPolicy.delayForAttempt(attempt);
                 System.err.println("Batch loi tam thoi bang " + tableName + " lan " + attempt + "/" + attempts
-                        + ", retry sau " + delayMs + " ms. Ly do: " + e.getMessage());
+                        + ", retry sau " + delayMs + " ms. Ly do: " + buildSqlExceptionDetail(e));
                 sleep(delayMs);
             }
         }
+    }
+
+    private static String buildSqlExceptionDetail(SQLException e) {
+        if (e == null) {
+            return "(khong co thong tin loi)";
+        }
+
+        StringBuilder sb = new StringBuilder();
+        SQLException current = e;
+        int depth = 0;
+        while (current != null && depth < 8) {
+            if (depth > 0) {
+                sb.append(" | ");
+            }
+            sb.append("[")
+                    .append(current.getClass().getSimpleName())
+                    .append("] SQLState=")
+                    .append(current.getSQLState())
+                    .append(", ErrorCode=")
+                    .append(current.getErrorCode())
+                    .append(", Message=")
+                    .append(current.getMessage());
+
+            if (current instanceof BatchUpdateException bue) {
+                int[] counts = bue.getUpdateCounts();
+                sb.append(", UpdateCounts=");
+                if (counts == null) {
+                    sb.append("null");
+                } else {
+                    sb.append("[");
+                    for (int i = 0; i < counts.length; i++) {
+                        if (i > 0) sb.append(",");
+                        sb.append(counts[i]);
+                    }
+                    sb.append("]");
+                }
+            }
+
+            SQLException next = current.getNextException();
+            if (next == null && current.getCause() instanceof SQLException causeSql) {
+                next = causeSql;
+            }
+            current = next;
+            depth++;
+        }
+
+        return sb.toString();
     }
 
     private static boolean isRetryableException(SQLException e) {
@@ -377,5 +436,208 @@ public class DataTransferService {
             return Types.TIME;
         }
         return jdbcType;
+    }
+
+    private static void setNullSafely(PreparedStatement pstmt, int index, int jdbcType) throws SQLException {
+        try {
+            pstmt.setNull(index, jdbcType);
+        } catch (SQLException ex) {
+            // Oracle thường không chấp nhận setNull với kiểu OTHER/JAVA_OBJECT.
+            if (jdbcType == Types.OTHER || jdbcType == Types.JAVA_OBJECT || jdbcType == Types.SQLXML) {
+                pstmt.setNull(index, Types.VARCHAR);
+                return;
+            }
+            throw ex;
+        }
+    }
+
+    private static void bindValueSafely(
+            PreparedStatement pstmt,
+            int index,
+            Object value,
+            int jdbcType,
+            ColumnDefinition column,
+            String tableName
+    ) throws SQLException {
+        switch (jdbcType) {
+            case Types.TIMESTAMP -> pstmt.setTimestamp(index, toTimestamp(value));
+            case Types.DATE -> pstmt.setDate(index, toSqlDate(value));
+            case Types.TIME -> pstmt.setTime(index, toSqlTime(value));
+            case Types.BOOLEAN, Types.BIT -> {
+                if (value instanceof Boolean b) {
+                    // Oracle target thường map BOOLEAN sang NUMBER(1)
+                    pstmt.setInt(index, b ? 1 : 0);
+                } else {
+                    pstmt.setObject(index, value, jdbcType);
+                }
+            }
+            default -> {
+                try {
+                    // Ưu tiên bind với JDBC type để tránh Oracle driver object mismatch.
+                    pstmt.setObject(index, value, jdbcType);
+                } catch (SQLException ex) {
+                    bindWithFallback(pstmt, index, value, jdbcType, column, tableName, ex);
+                }
+            }
+        }
+    }
+
+    private static void bindWithFallback(
+            PreparedStatement pstmt,
+            int index,
+            Object value,
+            int jdbcType,
+            ColumnDefinition column,
+            String tableName,
+            SQLException cause
+    ) throws SQLException {
+        // PostgreSQL-specific object types (json/jsonb/uuid/array/domain) thường đi qua JDBC OTHER.
+        if (jdbcType == Types.OTHER || jdbcType == Types.JAVA_OBJECT || isPgObject(value) || value instanceof UUID) {
+            pstmt.setString(index, value.toString());
+            return;
+        }
+
+        if (value instanceof OffsetDateTime odt) {
+            pstmt.setTimestamp(index, Timestamp.from(odt.toInstant()));
+            return;
+        }
+        if (value instanceof ZonedDateTime zdt) {
+            pstmt.setTimestamp(index, Timestamp.from(zdt.toInstant()));
+            return;
+        }
+        if (value instanceof Instant instant) {
+            pstmt.setTimestamp(index, Timestamp.from(instant));
+            return;
+        }
+        if (value instanceof LocalDateTime ldt) {
+            pstmt.setTimestamp(index, Timestamp.valueOf(ldt));
+            return;
+        }
+        if (value instanceof LocalDate ld) {
+            pstmt.setDate(index, Date.valueOf(ld));
+            return;
+        }
+        if (value instanceof LocalTime lt) {
+            pstmt.setTime(index, Time.valueOf(lt));
+            return;
+        }
+        if (value instanceof Boolean b) {
+            pstmt.setInt(index, b ? 1 : 0);
+            return;
+        }
+
+        // Last resort: let driver infer type.
+        if (isUnsupportedTypedBinding(cause)) {
+            pstmt.setObject(index, value);
+            return;
+        }
+
+        throw new SQLException(
+                "Khong the bind gia tri cho bang " + tableName
+                        + ", cot " + column.getName()
+                        + ", jdbcType=" + jdbcType
+                        + ", valueClass=" + value.getClass().getName()
+                        + ". Loi: " + cause.getMessage(),
+                cause
+        );
+    }
+
+    private static boolean isUnsupportedTypedBinding(SQLException e) {
+        String message = e == null || e.getMessage() == null ? "" : e.getMessage().toLowerCase();
+        return message.contains("invalid column type")
+                || message.contains("unsupported feature")
+                || message.contains("ora-17004");
+    }
+
+    private static boolean isPgObject(Object value) {
+        return value != null && "org.postgresql.util.PGobject".equals(value.getClass().getName());
+    }
+
+    private static Timestamp toTimestamp(Object value) throws SQLException {
+        if (value instanceof Timestamp ts) return ts;
+        if (value instanceof java.util.Date d) return new Timestamp(d.getTime());
+        if (value instanceof OffsetDateTime odt) return Timestamp.from(odt.toInstant());
+        if (value instanceof ZonedDateTime zdt) return Timestamp.from(zdt.toInstant());
+        if (value instanceof Instant instant) return Timestamp.from(instant);
+        if (value instanceof LocalDateTime ldt) return Timestamp.valueOf(ldt);
+        if (isOracleSqlType(value)) {
+            Timestamp ts = invokeTemporalGetter(value, "timestampValue", Timestamp.class);
+            if (ts != null) return ts;
+
+            Date d = invokeTemporalGetter(value, "dateValue", Date.class);
+            if (d != null) return new Timestamp(d.getTime());
+
+            Time t = invokeTemporalGetter(value, "timeValue", Time.class);
+            if (t != null) return new Timestamp(t.getTime());
+        }
+
+        if (value instanceof CharSequence cs) {
+            String raw = cs.toString().trim();
+            String normalized = raw.replace('T', ' ');
+            try {
+                return Timestamp.valueOf(normalized);
+            } catch (IllegalArgumentException ignored) {
+                // keep falling through to detailed error below
+            }
+        }
+        throw new SQLException("Khong the chuyen doi sang TIMESTAMP: " + value.getClass().getName());
+    }
+
+    private static Date toSqlDate(Object value) throws SQLException {
+        if (value instanceof Date d) return d;
+        if (value instanceof java.util.Date d) return new Date(d.getTime());
+        if (value instanceof LocalDate ld) return Date.valueOf(ld);
+        if (value instanceof Timestamp ts) return new Date(ts.getTime());
+        if (isOracleSqlType(value)) {
+            Date d = invokeTemporalGetter(value, "dateValue", Date.class);
+            if (d != null) return d;
+
+            Timestamp ts = invokeTemporalGetter(value, "timestampValue", Timestamp.class);
+            if (ts != null) return new Date(ts.getTime());
+        }
+        throw new SQLException("Khong the chuyen doi sang DATE: " + value.getClass().getName());
+    }
+
+    private static Time toSqlTime(Object value) throws SQLException {
+        if (value instanceof Time t) return t;
+        if (value instanceof LocalTime lt) return Time.valueOf(lt);
+        if (value instanceof java.util.Date d) return new Time(d.getTime());
+        if (isOracleSqlType(value)) {
+            Time t = invokeTemporalGetter(value, "timeValue", Time.class);
+            if (t != null) return t;
+
+            Timestamp ts = invokeTemporalGetter(value, "timestampValue", Timestamp.class);
+            if (ts != null) return new Time(ts.getTime());
+        }
+        throw new SQLException("Khong the chuyen doi sang TIME: " + value.getClass().getName());
+    }
+
+    private static boolean isOracleSqlType(Object value) {
+        if (value == null) {
+            return false;
+        }
+        String className = value.getClass().getName();
+        return className.startsWith("oracle.sql.") || className.startsWith("oracle.jdbc.");
+    }
+
+    private static <T> T invokeTemporalGetter(Object value, String methodName, Class<T> returnType) throws SQLException {
+        try {
+            Object result = value.getClass().getMethod(methodName).invoke(value);
+            if (result == null) {
+                return null;
+            }
+            if (returnType.isInstance(result)) {
+                return returnType.cast(result);
+            }
+            return null;
+        } catch (NoSuchMethodException ignored) {
+            return null;
+        } catch (ReflectiveOperationException e) {
+            throw new SQLException(
+                    "Khong the doc temporal value qua reflection method " + methodName
+                            + " tu " + value.getClass().getName(),
+                    e
+            );
+        }
     }
 }

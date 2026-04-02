@@ -1,6 +1,14 @@
 package org.example.migrationdbweb.migratetool;
 
-import java.util.*;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.LinkedList;
+import java.util.List;
+import java.util.Map;
+import java.util.Queue;
+import java.util.Set;
 import java.util.stream.Collectors;
 
 /**
@@ -48,11 +56,35 @@ public class TopologicalSortUtil {
             viewMap.put(key, view);
         }
 
+        // Normalize dependency keys/values to avoid case-sensitivity mismatches
+        // from metadata providers (e.g., PostgreSQL lowercase vs Oracle uppercase).
+        Map<String, Set<String>> normalizedInputDeps = new HashMap<>();
+        if (dependencyMap != null) {
+            for (Map.Entry<String, Set<String>> entry : dependencyMap.entrySet()) {
+                String viewKey = normalize(entry.getKey());
+                if (viewKey.isEmpty()) {
+                    continue;
+                }
+
+                Set<String> targetDeps = normalizedInputDeps.computeIfAbsent(viewKey, k -> new HashSet<>());
+                if (entry.getValue() == null) {
+                    continue;
+                }
+
+                for (String dep : entry.getValue()) {
+                    String depKey = normalize(dep);
+                    if (!depKey.isEmpty()) {
+                        targetDeps.add(depKey);
+                    }
+                }
+            }
+        }
+
         // Khởi tạo dependency map cho những view không có dependency ghi nhận
         Map<String, Set<String>> normalizedDeps = new HashMap<>();
         for (ViewDefinition view : views) {
             String viewKey = normalize(view.getViewName());
-            Set<String> deps = dependencyMap.getOrDefault(viewKey, Collections.emptySet());
+            Set<String> deps = normalizedInputDeps.getOrDefault(viewKey, Collections.emptySet());
             // Chỉ giữ lại dependency nào là VIEW trong danh sách cần migrate
             Set<String> filteredDeps = new HashSet<>();
             for (String dep : deps) {
