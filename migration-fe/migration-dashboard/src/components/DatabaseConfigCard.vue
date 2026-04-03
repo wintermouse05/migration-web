@@ -14,6 +14,48 @@
       </span>
     </div>
 
+    <div class="credential-tools">
+      <label class="field">
+        <span>Chon cau hinh da luu</span>
+        <select :value="selectedSavedCredentialId" @change="onSelectSavedCredential">
+          <option value="">-- Chon mot cau hinh da luu --</option>
+          <option
+            v-for="credential in savedCredentials"
+            :key="credential.id"
+            :value="credential.id"
+          >
+            {{ renderSavedCredentialOption(credential) }}
+          </option>
+        </select>
+      </label>
+
+      <label class="field">
+        <span>Ten de luu nhanh (tu chon)</span>
+        <input
+          v-model.trim="saveCredentialName"
+          type="text"
+          placeholder="Vi du: Oracle QA, PG Local"
+        />
+      </label>
+
+      <div class="save-row">
+        <button class="save-btn" type="button" :disabled="isSavingCredential" @click="onSaveCredential">
+          {{ isSavingCredential ? 'Dang luu...' : 'Luu credential' }}
+        </button>
+
+        <span v-if="saveCredentialError" class="save-error">
+          {{ saveCredentialError }}
+        </span>
+
+        <span
+          v-else-if="saveState?.message"
+          :class="['save-message', `save-${saveState.status || 'idle'}`]"
+        >
+          {{ saveState.message }}
+        </span>
+      </div>
+    </div>
+
     <div class="form-grid">
       <label class="field">
         <span>Loai co so du lieu</span>
@@ -39,6 +81,11 @@
       </label>
 
       <label class="field">
+        <span>Schema (tuy chon)</span>
+        <input v-model.trim="localConfig.schemaName" type="text" placeholder="public, scott, ..." />
+      </label>
+
+      <label class="field">
         <span>Username</span>
         <input v-model.trim="localConfig.username" type="text" autocomplete="username" />
       </label>
@@ -52,7 +99,7 @@
 </template>
 
 <script setup>
-import { reactive, watch } from 'vue';
+import { reactive, ref, watch } from 'vue';
 
 const props = defineProps({
   title: {
@@ -78,12 +125,35 @@ const props = defineProps({
   testState: {
     type: Object,
     default: () => ({ status: 'idle', message: '' })
+  },
+  savedCredentials: {
+    type: Array,
+    default: () => []
+  },
+  selectedSavedCredentialId: {
+    type: [Number, String],
+    default: ''
+  },
+  isSavingCredential: {
+    type: Boolean,
+    default: false
+  },
+  saveState: {
+    type: Object,
+    default: () => ({ status: 'idle', message: '' })
   }
 });
 
-const emit = defineEmits(['update:modelValue', 'test-connection']);
+const emit = defineEmits([
+  'update:modelValue',
+  'test-connection',
+  'save-credential',
+  'select-saved-credential'
+]);
 
 const localConfig = reactive({ ...props.modelValue });
+const saveCredentialName = ref('');
+const saveCredentialError = ref('');
 
 watch(
   () => props.modelValue,
@@ -100,6 +170,46 @@ watch(
   },
   { deep: true }
 );
+
+watch(saveCredentialName, () => {
+  saveCredentialError.value = '';
+});
+
+const onSaveCredential = () => {
+  const trimmedName = saveCredentialName.value.trim();
+  if (!trimmedName) {
+    saveCredentialError.value = 'Hay nhap ten de luu truoc khi bam nut luu.';
+    return;
+  }
+
+  saveCredentialError.value = '';
+  emit('save-credential', {
+    name: trimmedName,
+    config: { ...localConfig }
+  });
+};
+
+const onSelectSavedCredential = (event) => {
+  const selectedValue = event?.target?.value;
+  if (!selectedValue) {
+    emit('select-saved-credential', null);
+    return;
+  }
+  emit('select-saved-credential', Number(selectedValue));
+};
+
+const renderSavedCredentialOption = (credential) => {
+  if (!credential) {
+    return 'Credential';
+  }
+
+  const name = credential.displayName || 'Credential';
+  const cfg = credential.databaseConfig || {};
+  const type = cfg.type || 'DB';
+  const host = cfg.host || 'unknown-host';
+  const dbName = cfg.databaseName || 'unknown-db';
+  return `${name} (${type} - ${host}/${dbName})`;
+};
 </script>
 
 <style scoped>
@@ -125,6 +235,19 @@ watch(
   margin-bottom: 14px;
 }
 
+.credential-tools {
+  display: grid;
+  gap: 10px;
+  margin-bottom: 14px;
+}
+
+.save-row {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
 .test-btn {
   background: #eef7ff;
   border: 1px solid #bfd6f5;
@@ -140,6 +263,43 @@ watch(
 .test-btn:disabled {
   cursor: not-allowed;
   opacity: 0.7;
+}
+
+.save-btn {
+  background: #fff8e8;
+  border: 1px solid #e8cf97;
+  border-radius: 9px;
+  color: #96620d;
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 0.82rem;
+  font-weight: 700;
+  padding: 6px 10px;
+}
+
+.save-btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.7;
+}
+
+.save-message {
+  font-size: 0.8rem;
+  font-weight: 700;
+}
+
+.save-success {
+  color: #1b7a4f;
+}
+
+.save-error {
+  color: #b03535;
+  font-size: 0.8rem;
+  font-weight: 700;
+}
+
+.save-pending,
+.save-idle {
+  color: #5b6977;
 }
 
 .test-message {

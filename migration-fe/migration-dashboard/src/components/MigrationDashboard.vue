@@ -19,7 +19,13 @@
         v-model="sourceDb"
         :is-testing="sourceTestState.status === 'pending'"
         :test-state="sourceTestState"
+        :saved-credentials="savedCredentials"
+        :selected-saved-credential-id="selectedSourceCredentialId"
+        :is-saving-credential="sourceSaveState.status === 'pending'"
+        :save-state="sourceSaveState"
         @test-connection="testConnection('source')"
+        @save-credential="saveCredential('source', $event)"
+        @select-saved-credential="selectSavedCredential('source', $event)"
       />
 
       <DatabaseConfigCard
@@ -29,7 +35,13 @@
         v-model="targetDb"
         :is-testing="targetTestState.status === 'pending'"
         :test-state="targetTestState"
+        :saved-credentials="savedCredentials"
+        :selected-saved-credential-id="selectedTargetCredentialId"
+        :is-saving-credential="targetSaveState.status === 'pending'"
+        :save-state="targetSaveState"
         @test-connection="testConnection('target')"
+        @save-credential="saveCredential('target', $event)"
+        @select-saved-credential="selectSavedCredential('target', $event)"
       />
     </section>
 
@@ -69,6 +81,7 @@ const wsTopic = process.env.VUE_APP_WS_TOPIC || '/topic/status';
 const migrationStartUrl = `${apiBaseUrl}/api/migration/start`;
 const migrationStatusUrl = `${apiBaseUrl}/api/migration/status`;
 const testConnectionUrl = `${apiBaseUrl}/api/migration/test-connection`;
+const credentialStorageUrl = `${apiBaseUrl}/api/migration/credentials`;
 
 const isMigrating = ref(false);
 const progress = ref(0);
@@ -81,6 +94,7 @@ const sourceDb = ref({
   host: 'localhost',
   port: 1521,
   databaseName: 'ORCL',
+  schemaName: '',
   username: 'system',
   password: ''
 });
@@ -90,6 +104,7 @@ const targetDb = ref({
   host: '127.0.0.1',
   port: 5432,
   databaseName: 'migration_db',
+  schemaName: 'public',
   username: 'postgres',
   password: ''
 });
@@ -123,6 +138,11 @@ const resume = ref({
 
 const sourceTestState = ref({ status: 'idle', message: '' });
 const targetTestState = ref({ status: 'idle', message: '' });
+const sourceSaveState = ref({ status: 'idle', message: '' });
+const targetSaveState = ref({ status: 'idle', message: '' });
+const savedCredentials = ref([]);
+const selectedSourceCredentialId = ref('');
+const selectedTargetCredentialId = ref('');
 
 const canStartMigration = computed(() => {
   return Boolean(
@@ -287,8 +307,112 @@ const testConnection = async (role) => {
   }
 };
 
+const normalizeDatabaseConfig = (rawConfig) => {
+  if (!rawConfig) {
+    return null;
+  }
+
+  return {
+    type: rawConfig.type || 'POSTGRESQL',
+    host: rawConfig.host || '',
+    port: Number(rawConfig.port) || 0,
+    databaseName: rawConfig.databaseName || '',
+    schemaName: rawConfig.schemaName || '',
+    username: rawConfig.username || '',
+    password: rawConfig.password || ''
+  };
+};
+
+const fetchSavedCredentials = async (silent = false) => {
+  try {
+    const response = await axios.get(credentialStorageUrl);
+    const payload = Array.isArray(response?.data) ? response.data : [];
+    savedCredentials.value = payload;
+    if (!silent) {
+      addLog(`Da tai ${payload.length} credential da luu.`, 'success');
+    }
+  } catch (error) {
+    const message = error?.response?.data?.message || error?.message || 'Khong tai duoc credentials da luu.';
+    if (!silent) {
+      addLog(message, 'error');
+    }
+  }
+};
+
+const saveCredential = async (role, payload) => {
+  const state = role === 'source' ? sourceSaveState : targetSaveState;
+  const roleLabel = role === 'source' ? 'Source' : 'Target';
+
+  state.value = { status: 'pending', message: 'Dang luu...' };
+
+  try {
+    const response = await axios.post(credentialStorageUrl, {
+      name: payload.name,
+      config: payload.config
+    });
+
+    const saved = response?.data;
+    state.value = {
+      status: 'success',
+      message: `Da luu credential "${saved?.displayName || payload.name}".`
+    };
+
+    if (role === 'source') {
+      selectedSourceCredentialId.value = saved?.id || '';
+    } else {
+      selectedTargetCredentialId.value = saved?.id || '';
+    }
+
+    await fetchSavedCredentials(true);
+    addLog(`[${roleLabel}] Da luu credential de tai su dung.`, 'success');
+  } catch (error) {
+    const message =
+      error?.response?.data?.message ||
+      error?.response?.data ||
+      error?.message ||
+      'Khong the luu credential.';
+
+    state.value = { status: 'error', message: String(message) };
+    addLog(`[${roleLabel}] ${message}`, 'error');
+  }
+};
+
+const selectSavedCredential = (role, credentialId) => {
+  if (!credentialId) {
+    if (role === 'source') {
+      selectedSourceCredentialId.value = '';
+    } else {
+      selectedTargetCredentialId.value = '';
+    }
+    return;
+  }
+
+  const selected = savedCredentials.value.find((item) => Number(item.id) === Number(credentialId));
+  if (!selected) {
+    addLog('Khong tim thay credential da chon.', 'error');
+    return;
+  }
+
+  const config = normalizeDatabaseConfig(selected.databaseConfig);
+  if (!config) {
+    addLog('Credential da chon khong hop le.', 'error');
+    return;
+  }
+
+  if (role === 'source') {
+    sourceDb.value = { ...config };
+    selectedSourceCredentialId.value = selected.id;
+  } else {
+    targetDb.value = { ...config };
+    selectedTargetCredentialId.value = selected.id;
+  }
+
+  addLog(`[${role === 'source' ? 'Source' : 'Target'}] Da nap credential "${selected.displayName}".`, 'success');
+};
+
 onMounted(() => {
   fetchCurrentStatus(true);
+  fetchSavedCredentials(true);
   connectWebSocket();
 });
 

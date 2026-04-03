@@ -5,6 +5,7 @@ public class DatabaseConfig {
     private String host;
     private int port;
     private String databaseName;
+    private String schemaName;
     private String username;
     private String password;
     private int maximumPoolSize = 10;
@@ -63,6 +64,8 @@ public class DatabaseConfig {
     public void setPort(int port) {this.port = port;}
     public String getDatabaseName() {return databaseName;}
     public void setDatabaseName(String databaseName) {this.databaseName = databaseName;}
+    public String getSchemaName() {return schemaName;}
+    public void setSchemaName(String schemaName) {this.schemaName = schemaName;}
     public String getUsername() {return username;}
     public void setUsername(String username) {this.username = username;}
     public String getPassword() {return password;}

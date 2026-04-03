@@ -117,9 +117,13 @@ public class TriggerDefinition {
     /** Schema đích */
     private String targetSchema;
 
+    /** Full DDL text gốc của trigger function (PostgreSQL pg_get_functiondef), nếu có. */
+    private String functionDdl;
+
     /**
-     * Full DDL text gốc của trigger (lấy từ Oracle USER_TRIGGERS.TEXT).
-     * Dùng khi source = Oracle để giữ nguyên cú pháp gốc thay vì build lại từ definition.
+     * Full DDL text gốc của trigger.
+     * Oracle: DBMS_METADATA.GET_DDL.
+     * PostgreSQL: pg_get_triggerdef.
      */
     private String ddlText;
 

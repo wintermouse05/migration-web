@@ -8,56 +8,92 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.Locale;
 import java.util.Properties;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
 
 public class MigrationCheckpointStore {
     private static final String OFFSET_SUFFIX = ".offset";
     private static final String DONE_SUFFIX = ".done";
+    private static final ConcurrentMap<Path, Object> FILE_LOCKS = new ConcurrentHashMap<>();
 
     private final Path statePath;
     private final Properties properties;
+    private final Object fileLock;
+    private final String namespacePrefix;
 
     public MigrationCheckpointStore(String stateFile) {
+        this(stateFile, null);
+    }
+
+    public MigrationCheckpointStore(String stateFile, String namespace) {
         this.statePath = Paths.get(stateFile).toAbsolutePath().normalize();
         this.properties = new Properties();
-        load();
-    }
-
-    public synchronized boolean isTableCompleted(String tableName) {
-        return Boolean.parseBoolean(properties.getProperty(doneKey(tableName), "false"));
-    }
-
-    public synchronized int getTableOffset(String tableName) {
-        String value = properties.getProperty(offsetKey(tableName), "0");
-        try {
-            return Math.max(0, Integer.parseInt(value));
-        } catch (NumberFormatException ex) {
-            return 0;
+        this.fileLock = FILE_LOCKS.computeIfAbsent(this.statePath, ignored -> new Object());
+        this.namespacePrefix = normalizeNamespace(namespace);
+        synchronized (fileLock) {
+            loadFromDisk();
         }
     }
 
-    public synchronized void updateTableOffset(String tableName, int offset) {
-        int safeOffset = Math.max(0, offset);
-        properties.setProperty(offsetKey(tableName), Integer.toString(safeOffset));
-        properties.setProperty(doneKey(tableName), "false");
-        save();
+    public boolean isTableCompleted(String tableName) {
+        synchronized (fileLock) {
+            loadFromDisk();
+            return Boolean.parseBoolean(properties.getProperty(doneKey(tableName), "false"));
+        }
     }
 
-    public synchronized void markTableCompleted(String tableName, int finalOffset) {
-        int safeOffset = Math.max(0, finalOffset);
-        properties.setProperty(offsetKey(tableName), Integer.toString(safeOffset));
-        properties.setProperty(doneKey(tableName), "true");
-        save();
+    public int getTableOffset(String tableName) {
+        synchronized (fileLock) {
+            loadFromDisk();
+            String value = properties.getProperty(offsetKey(tableName), "0");
+            try {
+                return Math.max(0, Integer.parseInt(value));
+            } catch (NumberFormatException ex) {
+                return 0;
+            }
+        }
     }
 
-    public synchronized void clearTableState(String tableName) {
-        properties.remove(offsetKey(tableName));
-        properties.remove(doneKey(tableName));
-        save();
+    public void updateTableOffset(String tableName, int offset) {
+        synchronized (fileLock) {
+            loadFromDisk();
+            int safeOffset = Math.max(0, offset);
+            properties.setProperty(offsetKey(tableName), Integer.toString(safeOffset));
+            properties.setProperty(doneKey(tableName), "false");
+            saveToDisk();
+        }
     }
 
-    public synchronized void clear() {
-        properties.clear();
-        save();
+    public void markTableCompleted(String tableName, int finalOffset) {
+        synchronized (fileLock) {
+            loadFromDisk();
+            int safeOffset = Math.max(0, finalOffset);
+            properties.setProperty(offsetKey(tableName), Integer.toString(safeOffset));
+            properties.setProperty(doneKey(tableName), "true");
+            saveToDisk();
+        }
+    }
+
+    public void clearTableState(String tableName) {
+        synchronized (fileLock) {
+            loadFromDisk();
+            properties.remove(offsetKey(tableName));
+            properties.remove(doneKey(tableName));
+            saveToDisk();
+        }
+    }
+
+    public void clear() {
+        synchronized (fileLock) {
+            loadFromDisk();
+            if (namespacePrefix == null || namespacePrefix.isBlank()) {
+                properties.clear();
+            } else {
+                String keyPrefix = namespacePrefix + ".";
+                properties.keySet().removeIf(k -> String.valueOf(k).startsWith(keyPrefix));
+            }
+            saveToDisk();
+        }
     }
 
     public String getStateFilePath() {
@@ -65,11 +101,26 @@ public class MigrationCheckpointStore {
     }
 
     private String offsetKey(String tableName) {
-        return normalizeTableName(tableName) + OFFSET_SUFFIX;
+        return scopedKey(normalizeTableName(tableName) + OFFSET_SUFFIX);
     }
 
     private String doneKey(String tableName) {
-        return normalizeTableName(tableName) + DONE_SUFFIX;
+        return scopedKey(normalizeTableName(tableName) + DONE_SUFFIX);
+    }
+
+    private String scopedKey(String key) {
+        if (namespacePrefix == null || namespacePrefix.isBlank()) {
+            return key;
+        }
+        return namespacePrefix + "." + key;
+    }
+
+    private static String normalizeNamespace(String namespace) {
+        if (namespace == null || namespace.isBlank()) {
+            return "";
+        }
+        return namespace.trim().toUpperCase(Locale.ROOT)
+                .replaceAll("[^A-Z0-9._-]", "_");
     }
 
     private static String normalizeTableName(String tableName) {
@@ -79,7 +130,8 @@ public class MigrationCheckpointStore {
         return tableName.trim().toUpperCase(Locale.ROOT);
     }
 
-    private void load() {
+    private void loadFromDisk() {
+        properties.clear();
         if (!Files.exists(statePath)) {
             return;
         }
@@ -91,7 +143,7 @@ public class MigrationCheckpointStore {
         }
     }
 
-    private void save() {
+    private void saveToDisk() {
         try {
             Path parent = statePath.getParent();
             if (parent != null) {

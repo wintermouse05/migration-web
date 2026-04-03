@@ -2,6 +2,7 @@ package org.example.migrationdbweb.migratetool;
 
 import java.util.ArrayList;
 import java.util.List;
+
 import lombok.Builder;
 import lombok.Data;
 
@@ -72,6 +73,9 @@ public class FunctionDefinition {
 
     /** Schema đích */
     private String targetSchema;
+
+    /** Full DDL text gốc (ví dụ từ pg_get_functiondef) để tái tạo function/procedure theo nguyên bản. */
+    private String ddlText;
 
     public enum FunctionType {
         FUNCTION,

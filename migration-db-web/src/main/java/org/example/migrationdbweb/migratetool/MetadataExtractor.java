@@ -1,5 +1,7 @@
 package org.example.migrationdbweb.migratetool;
 
+import java.math.BigDecimal;
+import java.math.BigInteger;
 import java.sql.Connection;
 import java.sql.DatabaseMetaData;
 import java.sql.PreparedStatement;
@@ -204,26 +206,41 @@ public class MetadataExtractor {
         String checkOption = null;
 
         if (dbType == DatabaseType.ORACLE) {
-            // Oracle USER_VIEWS.TEXT chứa "CREATE [OR REPLACE] [NO] FORCE] [EDITIONING|...] VIEW ... AS subquery [WITH {CASCADED|LOCAL} CHECK OPTION] [WITH READ ONLY]"
-            // Cần parse để tách SELECT clause và checkOption ra khỏi prefix/suffix
-            String sql = "SELECT TEXT, TEXT_LENGTH FROM USER_VIEWS WHERE VIEW_NAME = ?";
-            try (PreparedStatement ps = conn.prepareStatement(sql)) {
-                ps.setString(1, viewName.toUpperCase());
-                try (ResultSet rs = ps.executeQuery()) {
-                    if (rs.next()) {
-                        String fullText = rs.getString("TEXT");
-                        ParseOracleViewResult parsed = parseOracleViewText(fullText);
-                        selectClause = parsed.selectClause;
-                        checkOption = parsed.checkOption;
+            // Prefer DBMS_METADATA for complete DDL, fallback to USER_VIEWS.TEXT.
+            String fullText = null;
+            try {
+                fullText = extractOracleViewDdlViaDbmsMetadata(conn, schema, viewName);
+            } catch (SQLException ex) {
+                System.err.println("WARN: DBMS_METADATA unavailable for view "
+                        + schema + "." + viewName + ": " + ex.getMessage());
+            }
+
+            if (fullText == null || fullText.isBlank()) {
+                String sql = "SELECT TEXT, TEXT_LENGTH FROM USER_VIEWS WHERE VIEW_NAME = ?";
+                try (PreparedStatement ps = conn.prepareStatement(sql)) {
+                    ps.setString(1, viewName.toUpperCase());
+                    try (ResultSet rs = ps.executeQuery()) {
+                        if (rs.next()) {
+                            fullText = rs.getString("TEXT");
+                        }
                     }
                 }
+            }
+
+            if (fullText != null && !fullText.isBlank()) {
+                ParseOracleViewResult parsed = parseOracleViewText(fullText);
+                selectClause = parsed.selectClause;
+                checkOption = parsed.checkOption;
             }
         } else if (dbType == DatabaseType.POSTGRESQL) {
             // Postgres: pg_get_viewdef trả về SELECT clause thuần (không có CREATE VIEW)
             String sql = """
-                SELECT pg_get_viewdef(v.oid, true) AS viewdef
-                FROM pg_views v
-                WHERE v.viewname = ? AND v.schemaname = ?
+                                SELECT pg_get_viewdef(c.oid, true) AS viewdef
+                                FROM pg_class c
+                                JOIN pg_namespace n ON n.oid = c.relnamespace
+                                WHERE c.relkind = 'v'
+                                    AND c.relname = ?
+                                    AND n.nspname = ?
                 """;
             try (PreparedStatement ps = conn.prepareStatement(sql)) {
                 ps.setString(1, viewName);
@@ -234,23 +251,30 @@ public class MetadataExtractor {
                     }
                 }
             }
-            // Postgres hỗ trợ check option — lấy từ pg_views
+            // Postgres hỗ trợ check option — lấy từ information_schema.views
             String checkSql = """
                 SELECT check_option
-                FROM pg_views
-                WHERE viewname = ? AND schemaname = ?
+                FROM information_schema.views
+                WHERE table_name = ? AND table_schema = ?
                 """;
-            try (PreparedStatement ps = conn.prepareStatement(checkSql)) {
-                ps.setString(1, viewName);
-                ps.setString(2, schema);
-                try (ResultSet rs = ps.executeQuery()) {
-                    if (rs.next()) {
-                        String co = rs.getString("check_option");
-                        if (co != null && !co.equalsIgnoreCase("NONE")) {
-                            checkOption = co;
+            try {
+                try (PreparedStatement ps = conn.prepareStatement(checkSql)) {
+                    ps.setString(1, viewName);
+                    ps.setString(2, schema);
+                    try (ResultSet rs = ps.executeQuery()) {
+                        if (rs.next()) {
+                            String co = rs.getString("check_option");
+                            if (co != null && !co.equalsIgnoreCase("NONE")) {
+                                checkOption = co;
+                            }
                         }
                     }
                 }
+            } catch (SQLException ex) {
+                // Một số metadata view có thể khác nhau theo version/permissions.
+                // Không coi đây là lỗi chặn migrate view.
+                System.err.println("WARN: Khong doc duoc check option cho view "
+                        + schema + "." + viewName + ": " + ex.getMessage());
             }
         }
 
@@ -284,41 +308,47 @@ public class MetadataExtractor {
         return Collections.emptyMap();
     }
 
-    /**
-     * PostgreSQL: lấy view dependencies từ pg_depends.
-     * pg_depends lưu: object A phụ thuộc object B (refobjid).
-     * Lọc chỉ giữ lại dependency là VIEW.
-     */
+        /**
+         * PostgreSQL: lấy view dependencies từ information_schema.view_table_usage.
+         * Chỉ giữ dependency mà object tham chiếu cũng là VIEW trong cùng schema.
+         */
     private Map<String, Set<String>> getViewDependencyMapPg(Connection conn, String schema) throws SQLException {
         Map<String, Set<String>> dependencyMap = new HashMap<>();
 
         String sql = """
             SELECT DISTINCT
-                dependent.relname    AS view_name,
-                dependency.relname   AS depends_on
-            FROM pg_depends d
-            JOIN pg_class dependent ON d.refobjid = dependent.oid
-            JOIN pg_class dependency ON d.depobjid = dependency.oid
-            JOIN pg_namespace dep_ns ON dependent.relnamespace = dep_ns.oid
-            JOIN pg_namespace ns    ON dependency.relnamespace = ns.oid
-            WHERE dep_ns.nspname = ?
-              AND dependent.relkind = 'v'
-              AND dependency.relkind = 'v'
-              AND dependent.relname != dependency.relname
-            ORDER BY dependent.relname, dependency.relname
+                                vtu.view_name  AS view_name,
+                                vtu.table_name AS depends_on
+                        FROM information_schema.view_table_usage vtu
+                        JOIN information_schema.views ref_v
+                            ON ref_v.table_schema = vtu.table_schema
+                         AND ref_v.table_name = vtu.table_name
+                        WHERE vtu.view_schema = ?
+                            AND vtu.table_schema = ?
+                            AND vtu.view_name <> vtu.table_name
+                        ORDER BY vtu.view_name, vtu.table_name
             """;
 
-        try (PreparedStatement ps = conn.prepareStatement(sql)) {
-            ps.setString(1, schema);
-            try (ResultSet rs = ps.executeQuery()) {
-                while (rs.next()) {
-                    String viewName = rs.getString("view_name");
-                    String dependsOn = rs.getString("depends_on");
-                    dependencyMap
-                            .computeIfAbsent(viewName, k -> new HashSet<>())
-                            .add(dependsOn);
+        try {
+            try (PreparedStatement ps = conn.prepareStatement(sql)) {
+                ps.setString(1, schema);
+                ps.setString(2, schema);
+                try (ResultSet rs = ps.executeQuery()) {
+                    while (rs.next()) {
+                        String viewName = rs.getString("view_name");
+                        String dependsOn = rs.getString("depends_on");
+                        dependencyMap
+                                .computeIfAbsent(viewName, k -> new HashSet<>())
+                                .add(dependsOn);
+                    }
                 }
             }
+        } catch (SQLException ex) {
+            // Fallback an toàn: khi không đọc được dependency map thì vẫn migrate views
+            // theo thứ tự metadata mặc định, tránh fail toàn bộ phase vì khác biệt catalog.
+            System.err.println("WARN: Khong doc duoc dependency map cho PostgreSQL views (schema="
+                    + schema + "). Se tiep tuc migrate views theo thu tu mac dinh. Ly do: " + ex.getMessage());
+            return Collections.emptyMap();
         }
         return dependencyMap;
     }
@@ -421,6 +451,9 @@ public class MetadataExtractor {
             String sql = """
                 SELECT SEQUENCE_NAME
                 FROM USER_SEQUENCES
+                                WHERE SEQUENCE_NAME NOT LIKE 'ISEQ$$\\_%' ESCAPE '\\'
+                  AND SEQUENCE_NAME NOT LIKE 'BIN$%'
+                  AND SEQUENCE_NAME NOT LIKE 'DR$%'
                 ORDER BY SEQUENCE_NAME
                 """;
             try (Statement st = conn.createStatement();
@@ -442,8 +475,21 @@ public class MetadataExtractor {
         if (conn.getMetaData().getDatabaseProductName().contains("PostgreSQL")) {
             return extractSequenceDefinitionPg(conn, schema, sequenceName);
         } else {
+            if (isOracleSystemSequenceName(sequenceName)) {
+                return null;
+            }
             return extractSequenceDefinitionOracle(conn, schema, sequenceName);
         }
+    }
+
+    private static boolean isOracleSystemSequenceName(String sequenceName) {
+        if (sequenceName == null || sequenceName.isBlank()) {
+            return false;
+        }
+        String upper = sequenceName.toUpperCase(Locale.ROOT);
+        return upper.startsWith("ISEQ$$")
+                || upper.startsWith("BIN$")
+                || upper.startsWith("DR$");
     }
 
     private SequenceDefinition extractSequenceDefinitionPg(
@@ -470,11 +516,11 @@ public class MetadataExtractor {
                             .sequenceName(rs.getString("sequence_name"))
                             .schema(schema)
                             .sourceDialect(DatabaseType.POSTGRESQL)
-                            .startValue(rs.getLong("start_value"))
-                            .incrementBy(rs.getLong("increment"))
-                            .minValue(toNonNullLong(rs, "minimum_value"))
-                            .maxValue(toNonNullLong(rs, "maximum_value"))
-                            .cacheSize(toNonNullLong(rs, "cache_size"))
+                            .startValue(toRequiredLongSafely(rs, "start_value", 1L, sequenceName))
+                            .incrementBy(toRequiredLongSafely(rs, "increment", 1L, sequenceName))
+                            .minValue(toNullableLongSafely(rs, "minimum_value", sequenceName))
+                            .maxValue(toNullableLongSafely(rs, "maximum_value", sequenceName))
+                            .cacheSize(toNullableLongSafely(rs, "cache_size", sequenceName))
                             .cycle("YES".equalsIgnoreCase(rs.getString("cycle_option")))
                             .sourceSchema(schema)
                             .build();
@@ -504,21 +550,28 @@ public class MetadataExtractor {
             ps.setString(1, sequenceName);
             try (ResultSet rs = ps.executeQuery()) {
                 if (rs.next()) {
-                    long lastNumber = rs.getLong("LAST_NUMBER");
-                    long incrementBy = rs.getLong("INCREMENT_BY");
+                    BigDecimal lastNumberRaw = rs.getBigDecimal("LAST_NUMBER");
+                    BigDecimal incrementByRaw = rs.getBigDecimal("INCREMENT_BY");
+
+                    long incrementBy = toLongSaturated(incrementByRaw, 1L, "INCREMENT_BY", sequenceName);
+
                     // Oracle START WITH = LAST_NUMBER (giá trị cuối cùng đã generate)
-                    long startValue = Math.max(1, lastNumber - incrementBy + 1);
+                    BigDecimal startValueRaw = (lastNumberRaw == null ? BigDecimal.ONE : lastNumberRaw)
+                            .subtract(incrementByRaw == null ? BigDecimal.ONE : incrementByRaw)
+                            .add(BigDecimal.ONE);
+                    long startValue = Math.max(1L, toLongSaturated(startValueRaw, 1L, "START_VALUE", sequenceName));
+
                     return SequenceDefinition.builder()
                             .sequenceName(rs.getString("SEQUENCE_NAME"))
                             .schema(schema)
                             .sourceDialect(DatabaseType.ORACLE)
                             .startValue(startValue)
                             .incrementBy(incrementBy)
-                            .minValue(toNonNullLong(rs, "MIN_VALUE"))
-                            .maxValue(toNonNullLong(rs, "MAX_VALUE"))
-                            .cacheSize(toNonNullLong(rs, "CACHE_SIZE"))
+                            .minValue(toNullableLongSafely(rs, "MIN_VALUE", sequenceName))
+                            .maxValue(toNullableLongSafely(rs, "MAX_VALUE", sequenceName))
+                            .cacheSize(toNullableLongSafely(rs, "CACHE_SIZE", sequenceName))
                             .cycle("Y".equalsIgnoreCase(rs.getString("CYCLE_FLAG")))
-                            .lastNumber(lastNumber)
+                            .lastNumber(toNullableLongSafely(rs, "LAST_NUMBER", sequenceName))
                             .sourceSchema(schema)
                             .build();
                 }
@@ -527,9 +580,54 @@ public class MetadataExtractor {
         return null;
     }
 
-    private static Long toNonNullLong(ResultSet rs, String column) throws SQLException {
-        long val = rs.getLong(column);
-        return rs.wasNull() ? null : val;
+    private static Long toNullableLongSafely(ResultSet rs, String column, String sequenceName) throws SQLException {
+        BigDecimal value = rs.getBigDecimal(column);
+        if (value == null) {
+            return null;
+        }
+        return toLongOrNullIfOverflow(value, column, sequenceName);
+    }
+
+    private static long toRequiredLongSafely(ResultSet rs, String column, long fallback, String sequenceName) throws SQLException {
+        BigDecimal value = rs.getBigDecimal(column);
+        return toLongSaturated(value, fallback, column, sequenceName);
+    }
+
+    private static long toLongSaturated(BigDecimal value, long fallback, String column, String sequenceName) {
+        if (value == null) {
+            return fallback;
+        }
+
+        BigInteger integerValue = value.toBigInteger();
+        BigInteger longMin = BigInteger.valueOf(Long.MIN_VALUE);
+        BigInteger longMax = BigInteger.valueOf(Long.MAX_VALUE);
+
+        if (integerValue.compareTo(longMin) < 0) {
+            System.err.println("[SEQ-WARN] " + sequenceName + ": " + column
+                    + " < Long.MIN_VALUE, clamp ve Long.MIN_VALUE.");
+            return Long.MIN_VALUE;
+        }
+        if (integerValue.compareTo(longMax) > 0) {
+            System.err.println("[SEQ-WARN] " + sequenceName + ": " + column
+                    + " > Long.MAX_VALUE, clamp ve Long.MAX_VALUE.");
+            return Long.MAX_VALUE;
+        }
+
+        return integerValue.longValue();
+    }
+
+    private static Long toLongOrNullIfOverflow(BigDecimal value, String column, String sequenceName) {
+        BigInteger integerValue = value.toBigInteger();
+        BigInteger longMin = BigInteger.valueOf(Long.MIN_VALUE);
+        BigInteger longMax = BigInteger.valueOf(Long.MAX_VALUE);
+
+        if (integerValue.compareTo(longMin) < 0 || integerValue.compareTo(longMax) > 0) {
+            System.err.println("[SEQ-WARN] " + sequenceName + ": " + column
+                    + " vuot pham vi BIGINT, bo qua gia tri nay.");
+            return null;
+        }
+
+        return integerValue.longValue();
     }
 
     // ─────────────────────────────────────────────────────────────
@@ -559,10 +657,27 @@ public class MetadataExtractor {
                 }
             }
         } else {
-            // Oracle: USER_INDEXES
+                        // Oracle: USER_INDEXES (bo qua index backing constraint PK/UNIQUE)
             String sql = tableName == null
-                    ? "SELECT INDEX_NAME FROM USER_INDEXES ORDER BY INDEX_NAME"
-                    : "SELECT INDEX_NAME FROM USER_INDEXES WHERE TABLE_NAME = UPPER(?) ORDER BY INDEX_NAME";
+                                        ? """
+                                            SELECT i.INDEX_NAME
+                                            FROM USER_INDEXES i
+                                            LEFT JOIN USER_CONSTRAINTS c
+                                                ON c.INDEX_NAME = i.INDEX_NAME
+                                             AND c.CONSTRAINT_TYPE IN ('P', 'U')
+                                            WHERE c.INDEX_NAME IS NULL
+                                            ORDER BY i.INDEX_NAME
+                                            """
+                                        : """
+                                            SELECT i.INDEX_NAME
+                                            FROM USER_INDEXES i
+                                            LEFT JOIN USER_CONSTRAINTS c
+                                                ON c.INDEX_NAME = i.INDEX_NAME
+                                             AND c.CONSTRAINT_TYPE IN ('P', 'U')
+                                            WHERE i.TABLE_NAME = UPPER(?)
+                                                AND c.INDEX_NAME IS NULL
+                                            ORDER BY i.INDEX_NAME
+                                            """;
             try (PreparedStatement ps = conn.prepareStatement(sql)) {
                 if (tableName != null) ps.setString(1, tableName);
                 try (ResultSet rs = ps.executeQuery()) {
@@ -604,54 +719,112 @@ public class MetadataExtractor {
             FROM pg_indexes i
             JOIN pg_class c ON c.relname = i.tablename
             JOIN pg_namespace n ON n.nspname = i.schemaname AND n.oid = c.relnamespace
-            JOIN pg_index x ON x.indrelid = c.oid AND x.indexname = i.indexname
+            JOIN pg_class ic ON ic.relname = i.indexname
+            JOIN pg_namespace ins ON ins.oid = ic.relnamespace AND ins.nspname = i.schemaname
+            JOIN pg_index x ON x.indrelid = c.oid AND x.indexrelid = ic.oid
             WHERE i.schemaname = ? AND i.indexname = ?
             """;
+        try {
+            try (PreparedStatement ps = conn.prepareStatement(sql)) {
+                ps.setString(1, schema);
+                ps.setString(2, indexName);
+                try (ResultSet rs = ps.executeQuery()) {
+                    if (rs.next()) {
+                        String indexDef = rs.getString("indexdef"); // ví dụ: "CREATE UNIQUE INDEX ..."
+                        String tableName = rs.getString("tablename");
+                        boolean unique = rs.getBoolean("indisunique");
+                        boolean primary = rs.getBoolean("indisprimary");
+
+                        // Phân tích indexdef để lấy columns và type
+                        List<String> columns = parseColumnsFromPgIndexDef(indexDef);
+                        String expr = parseExpressionFromPgIndexDef(indexDef);
+                        String whereClause = parseWhereFromPgIndexDef(indexDef);
+                        IndexDefinition.IndexType type = parseIndexTypeFromPgIndexDef(indexDef);
+
+                        // System index nếu là PK index (pg_toast, v.v.)
+                        boolean system = indexName.startsWith("pg_")
+                                || indexName.startsWith("sql_")
+                                || primary;
+
+                        return IndexDefinition.builder()
+                                .indexName(indexName)
+                                .schema(schema)
+                                .tableName(tableName)
+                                .columns(columns)
+                                .unique(unique)
+                                .indexType(type)
+                                .expression(expr)
+                                .whereClause(whereClause)
+                                .indexTypeName(type.name())
+                                .sourceDialect(DatabaseType.POSTGRESQL)
+                                .sourceSchema(schema)
+                                .systemIndex(system)
+                                .build();
+                    }
+                }
+            }
+        } catch (SQLException ex) {
+            System.err.println("WARN: Khong trich xuat duoc metadata index chi tiet cho "
+                    + schema + "." + indexName + ". Thu fallback tu pg_indexes. Ly do: " + ex.getMessage());
+            return extractIndexDefinitionPgFallback(conn, schema, indexName);
+        }
+        return null;
+    }
+
+    private IndexDefinition extractIndexDefinitionPgFallback(
+            Connection conn, String schema, String indexName
+    ) throws SQLException {
+        String sql = """
+            SELECT indexname, tablename, indexdef
+            FROM pg_indexes
+            WHERE schemaname = ? AND indexname = ?
+            """;
+
         try (PreparedStatement ps = conn.prepareStatement(sql)) {
             ps.setString(1, schema);
             ps.setString(2, indexName);
             try (ResultSet rs = ps.executeQuery()) {
-                if (rs.next()) {
-                    String indexDef = rs.getString("indexdef"); // ví dụ: "CREATE UNIQUE INDEX ..."
-                    String tableName = rs.getString("tablename");
-                    boolean unique = rs.getBoolean("indisunique");
-                    boolean primary = rs.getBoolean("indisprimary");
-
-                    // Phân tích indexdef để lấy columns và type
-                    List<String> columns = parseColumnsFromPgIndexDef(indexDef);
-                    String expr = parseExpressionFromPgIndexDef(indexDef);
-                    String whereClause = parseWhereFromPgIndexDef(indexDef);
-                    IndexDefinition.IndexType type = parseIndexTypeFromPgIndexDef(indexDef);
-
-                    // System index nếu là PK index (pg_toast, v.v.)
-                    boolean system = indexName.startsWith("pg_")
-                            || indexName.startsWith("sql_")
-                            || primary;
-
-                    return IndexDefinition.builder()
-                            .indexName(indexName)
-                            .schema(schema)
-                            .tableName(tableName)
-                            .columns(columns)
-                            .unique(unique)
-                            .indexType(type)
-                            .expression(expr)
-                            .whereClause(whereClause)
-                            .indexTypeName(type.name())
-                            .sourceDialect(DatabaseType.POSTGRESQL)
-                            .sourceSchema(schema)
-                            .systemIndex(system)
-                            .build();
+                if (!rs.next()) {
+                    return null;
                 }
+
+                String tableName = rs.getString("tablename");
+                String indexDef = rs.getString("indexdef");
+                String normalizedDef = indexDef == null ? "" : indexDef.toUpperCase(Locale.ROOT);
+                boolean unique = normalizedDef.contains("CREATE UNIQUE INDEX");
+                boolean primary = indexName != null && indexName.toLowerCase(Locale.ROOT).endsWith("_pkey");
+
+                List<String> columns = parseColumnsFromPgIndexDef(indexDef);
+                String expr = parseExpressionFromPgIndexDef(indexDef);
+                String whereClause = parseWhereFromPgIndexDef(indexDef);
+                IndexDefinition.IndexType type = parseIndexTypeFromPgIndexDef(indexDef);
+
+                boolean system = indexName.startsWith("pg_")
+                        || indexName.startsWith("sql_")
+                        || primary;
+
+                return IndexDefinition.builder()
+                        .indexName(indexName)
+                        .schema(schema)
+                        .tableName(tableName)
+                        .columns(columns)
+                        .unique(unique)
+                        .indexType(type)
+                        .expression(expr)
+                        .whereClause(whereClause)
+                        .indexTypeName(type.name())
+                        .sourceDialect(DatabaseType.POSTGRESQL)
+                        .sourceSchema(schema)
+                        .systemIndex(system)
+                        .build();
             }
         }
-        return null;
     }
 
     private IndexDefinition extractIndexDefinitionOracle(
             Connection conn, String schema, String indexName
     ) throws SQLException {
-        // Oracle: lấy từ USER_INDEXES + USER_IND_COLUMNS
+        // Oracle: lấy từ USER_INDEXES + USER_IND_COLUMNS + USER_CONSTRAINTS
         String idxSql = """
             SELECT
                 i.INDEX_NAME,
@@ -660,8 +833,13 @@ public class MetadataExtractor {
                 i.INDEX_TYPE,
                 i.TABLESPACE_NAME,
                 i.VISIBILITY,
-                i.ITYP_NAME
+                i.ITYP_NAME,
+                c.CONSTRAINT_TYPE,
+                c.GENERATED
             FROM USER_INDEXES i
+            LEFT JOIN USER_CONSTRAINTS c
+              ON c.INDEX_NAME = i.INDEX_NAME
+             AND c.CONSTRAINT_TYPE IN ('P', 'U')
             WHERE i.INDEX_NAME = UPPER(?)
             """;
         try (PreparedStatement ps = conn.prepareStatement(idxSql)) {
@@ -674,6 +852,8 @@ public class MetadataExtractor {
                 String idxType = rs.getString("INDEX_TYPE");
                 String tablespace = rs.getString("TABLESPACE_NAME");
                 String itypName = rs.getString("ITYP_NAME");
+                String constraintType = rs.getString("CONSTRAINT_TYPE");
+                String generated = rs.getString("GENERATED");
 
                 // Lấy columns
                 List<String> columns = new ArrayList<>();
@@ -711,11 +891,16 @@ public class MetadataExtractor {
 
                 IndexDefinition.IndexType type = mapOracleIndexType(idxType, itypName);
 
-                // System index: thường do FK hoặc unique constraint tạo ra
-                boolean system = uniqueness != null && !"UNIQUE".equalsIgnoreCase(uniqueness)
-                        && tableName != null && !columns.isEmpty()
-                        && (indexName.startsWith("BIN$") || indexName.startsWith("DR$")
-                            || indexName.contains("$"));
+                // System index: index backing PK/UNIQUE constraint hoac index generated by Oracle.
+                boolean isConstraintBacked = constraintType != null
+                    && ("P".equalsIgnoreCase(constraintType) || "U".equalsIgnoreCase(constraintType));
+                boolean isGeneratedName = generated != null && generated.toUpperCase(Locale.ROOT).contains("GENERATED");
+                boolean system = isConstraintBacked
+                    || isGeneratedName
+                    || indexName.startsWith("SYS_")
+                    || indexName.startsWith("BIN$")
+                    || indexName.startsWith("DR$")
+                    || indexName.contains("$");
 
                 return IndexDefinition.builder()
                         .indexName(rs.getString("INDEX_NAME"))
@@ -856,11 +1041,10 @@ public class MetadataExtractor {
             String sql = """
                 SELECT t.tgname AS trigger_name
                 FROM pg_trigger t
-                JOIN pg_proc p ON t.tgfoid = p.oid
-                JOIN pg_namespace n ON t.tgnamespace = n.oid
+                                JOIN pg_class c ON t.tgrelid = c.oid
+                                JOIN pg_namespace n ON c.relnamespace = n.oid
                 WHERE n.nspname = ?
                   AND NOT t.tgisinternal
-                  AND NOT t.tginternal
                 ORDER BY t.tgname
                 """;
             try (PreparedStatement ps = conn.prepareStatement(sql)) {
@@ -912,6 +1096,8 @@ public class MetadataExtractor {
                 n.nspname AS schema_name,
                 p.proname AS function_name,
                 p.prosrc AS function_body,
+                pg_get_functiondef(p.oid) AS function_ddl,
+                pg_get_triggerdef(t.oid, true) AS trigger_ddl,
                 t.tgtype,
                 CASE WHEN (t.tgtype & 1) = 1 THEN 'ROW' ELSE 'STATEMENT' END AS level,
                 CASE WHEN (t.tgtype & 2) = 2 THEN 'BEFORE' ELSE 'AFTER' END AS timing,
@@ -934,7 +1120,7 @@ public class MetadataExtractor {
             FROM pg_trigger t
             JOIN pg_proc p ON t.tgfoid = p.oid
             JOIN pg_class c ON t.tgrelid = c.oid
-            JOIN pg_namespace n ON t.tgnamespace = n.oid
+                        JOIN pg_namespace n ON c.relnamespace = n.oid
             WHERE n.nspname = ? AND t.tgname = ?
               AND NOT t.tgisinternal
             """;
@@ -946,6 +1132,8 @@ public class MetadataExtractor {
                     String tableName = rs.getString("table_name");
                     String functionName = rs.getString("function_name");
                     String functionBody = rs.getString("function_body");
+                    String functionDdl = rs.getString("function_ddl");
+                    String triggerDdl = rs.getString("trigger_ddl");
                     String level = rs.getString("level");
                     String timing = rs.getString("timing");
                     // Nếu timing2 = 'INSTEAD OF' thì trigger là INSTEAD OF (trên VIEW),
@@ -970,8 +1158,10 @@ public class MetadataExtractor {
                             .level(triggerLevel)
                             .triggerBody(functionBody)
                             .functionName(functionName)
+                            .functionDdl(functionDdl)
                             .enabled(true)
                             .sourceSchema(schema)
+                            .ddlText(triggerDdl)
                             .build();
                 }
             }
@@ -1062,7 +1252,7 @@ public class MetadataExtractor {
                 SELECT t.tgname
                 FROM pg_trigger t
                 JOIN pg_class c ON t.tgrelid = c.oid
-                JOIN pg_namespace n ON t.tgnamespace = n.oid
+                                JOIN pg_namespace n ON c.relnamespace = n.oid
                 WHERE n.nspname = ? AND c.relname = ?
                   AND NOT t.tgisinternal
                 ORDER BY t.tgname
@@ -1110,13 +1300,20 @@ public class MetadataExtractor {
                   AND p.prokind IN ('f', 'p')
                 ORDER BY p.proname
                 """;
-            try (PreparedStatement ps = conn.prepareStatement(sql)) {
-                ps.setString(1, schema);
-                try (ResultSet rs = ps.executeQuery()) {
-                    while (rs.next()) {
-                        names.add(rs.getString("name"));
+            try {
+                try (PreparedStatement ps = conn.prepareStatement(sql)) {
+                    ps.setString(1, schema);
+                    try (ResultSet rs = ps.executeQuery()) {
+                        while (rs.next()) {
+                            names.add(rs.getString("name"));
+                        }
                     }
                 }
+            } catch (SQLException ex) {
+                // Fallback cho PostgreSQL versions/catalogs không có cột prokind.
+                System.err.println("WARN: Khong the doc function list bang query prokind, "
+                        + "thu fallback query. Ly do: " + ex.getMessage());
+                names.addAll(getFunctionNamesPgFallback(conn, schema));
             }
         } else {
             String sql = """
@@ -1152,31 +1349,101 @@ public class MetadataExtractor {
         String sql = """
             SELECT p.proname, n.nspname, p.prosrc AS body,
                    p.prokind, l.lanname AS language,
+                   pg_get_functiondef(p.oid) AS ddl_text,
+                   pg_get_function_result(p.oid) AS result_type,
                    CASE WHEN p.prokind = 'p' THEN 'PROCEDURE' ELSE 'FUNCTION' END AS obj_type
             FROM pg_proc p
             JOIN pg_namespace n ON p.pronamespace = n.oid
             JOIN pg_language l ON p.prolang = l.oid
             WHERE n.nspname = ? AND p.proname = ?
             """;
-        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+        try {
+            try (PreparedStatement ps = conn.prepareStatement(sql)) {
+                ps.setString(1, schema);
+                ps.setString(2, functionName);
+                try (ResultSet rs = ps.executeQuery()) {
+                    if (rs.next()) {
+                        String objType = rs.getString("obj_type");
+                        return FunctionDefinition.builder()
+                                .functionName(rs.getString("proname"))
+                                .schema(schema)
+                                .sourceDialect(DatabaseType.POSTGRESQL)
+                                .functionType(FunctionDefinition.FunctionType.valueOf(objType))
+                                .language(rs.getString("language"))
+                                .functionBody(rs.getString("body"))
+                                .returnType(rs.getString("result_type"))
+                                .sourceSchema(schema)
+                                .ddlText(rs.getString("ddl_text"))
+                                .build();
+                    }
+                }
+            }
+        } catch (SQLException ex) {
+            System.err.println("WARN: Khong the trich xuat function metadata day du cho "
+                    + schema + "." + functionName + ". Thu fallback query. Ly do: " + ex.getMessage());
+            return extractFunctionDefinitionPgFallback(conn, schema, functionName);
+        }
+        return null;
+    }
+
+    private List<String> getFunctionNamesPgFallback(Connection conn, String schema) throws SQLException {
+        List<String> names = new ArrayList<>();
+        String fallbackSql = """
+            SELECT p.proname AS name
+            FROM pg_proc p
+            JOIN pg_namespace n ON p.pronamespace = n.oid
+            WHERE n.nspname = ?
+            ORDER BY p.proname
+            """;
+
+        try (PreparedStatement ps = conn.prepareStatement(fallbackSql)) {
             ps.setString(1, schema);
-            ps.setString(2, functionName);
             try (ResultSet rs = ps.executeQuery()) {
-                if (rs.next()) {
-                    String objType = rs.getString("obj_type");
-                    return FunctionDefinition.builder()
-                            .functionName(rs.getString("proname"))
-                            .schema(schema)
-                            .sourceDialect(DatabaseType.POSTGRESQL)
-                            .functionType(FunctionDefinition.FunctionType.valueOf(objType))
-                            .language(rs.getString("language"))
-                            .functionBody(rs.getString("body"))
-                            .sourceSchema(schema)
-                            .build();
+                while (rs.next()) {
+                    names.add(rs.getString("name"));
                 }
             }
         }
-        return null;
+        return names;
+    }
+
+    private FunctionDefinition extractFunctionDefinitionPgFallback(
+            Connection conn, String schema, String functionName
+    ) throws SQLException {
+        String fallbackSql = """
+            SELECT p.proname, n.nspname, p.prosrc AS body,
+                   l.lanname AS language,
+                   pg_get_functiondef(p.oid) AS ddl_text,
+                   pg_get_function_result(p.oid) AS result_type
+            FROM pg_proc p
+            JOIN pg_namespace n ON p.pronamespace = n.oid
+            JOIN pg_language l ON p.prolang = l.oid
+            WHERE n.nspname = ? AND p.proname = ?
+            ORDER BY p.oid
+            LIMIT 1
+            """;
+
+        try (PreparedStatement ps = conn.prepareStatement(fallbackSql)) {
+            ps.setString(1, schema);
+            ps.setString(2, functionName);
+            try (ResultSet rs = ps.executeQuery()) {
+                if (!rs.next()) {
+                    return null;
+                }
+
+                return FunctionDefinition.builder()
+                        .functionName(rs.getString("proname"))
+                        .schema(schema)
+                        .sourceDialect(DatabaseType.POSTGRESQL)
+                        .functionType(FunctionDefinition.FunctionType.FUNCTION)
+                        .language(rs.getString("language"))
+                        .functionBody(rs.getString("body"))
+                        .returnType(rs.getString("result_type"))
+                        .sourceSchema(schema)
+                        .ddlText(rs.getString("ddl_text"))
+                        .build();
+            }
+        }
     }
 
     private FunctionDefinition extractFunctionDefinitionOracle(
@@ -1218,6 +1485,14 @@ public class MetadataExtractor {
                         ? FunctionDefinition.FunctionType.FUNCTION
                         : FunctionDefinition.FunctionType.PROCEDURE;
 
+        String ddlText = null;
+        try {
+            ddlText = extractOracleRoutineDdlViaDbmsMetadata(conn, schema, objectType, functionName);
+        } catch (SQLException ex) {
+            System.err.println("WARN: DBMS_METADATA unavailable for routine "
+                + schema + "." + functionName + " (" + objectType + "): " + ex.getMessage());
+        }
+
         return FunctionDefinition.builder()
                 .functionName(functionName)
                 .schema(schema)
@@ -1228,6 +1503,7 @@ public class MetadataExtractor {
                 .sourceSchema(schema)
                 .arguments(argsAndReturn.arguments)
                 .returnType(argsAndReturn.returnType)
+            .ddlText(ddlText)
                 .build();
     }
 
@@ -1325,6 +1601,57 @@ public class MetadataExtractor {
                     if (clob != null) {
                         long length = clob.length();
                         if (length > 0 && length < 1_000_000) { // giới hạn 1MB
+                            return clob.getSubString(1, (int) length).trim();
+                        }
+                    }
+                }
+            }
+        }
+        return null;
+    }
+
+    private String extractOracleRoutineDdlViaDbmsMetadata(
+            Connection conn, String schema, String objectType, String routineName
+    ) throws SQLException {
+        String normalizedType = objectType == null ? "FUNCTION" : objectType.trim().toUpperCase(Locale.ROOT);
+        if (!"FUNCTION".equals(normalizedType) && !"PROCEDURE".equals(normalizedType)) {
+            return null;
+        }
+
+        String sql = "SELECT DBMS_METADATA.GET_DDL(?, ?, ?) AS DDL_TEXT FROM DUAL";
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setString(1, normalizedType);
+            ps.setString(2, routineName);
+            ps.setString(3, schema);
+            try (ResultSet rs = ps.executeQuery()) {
+                if (rs.next()) {
+                    java.sql.Clob clob = rs.getClob("DDL_TEXT");
+                    if (clob != null) {
+                        long length = clob.length();
+                        if (length > 0 && length < 2_000_000) {
+                            return clob.getSubString(1, (int) length).trim();
+                        }
+                    }
+                }
+            }
+        }
+
+        return null;
+    }
+
+    private String extractOracleViewDdlViaDbmsMetadata(
+            Connection conn, String schema, String viewName
+    ) throws SQLException {
+        String sql = "SELECT DBMS_METADATA.GET_DDL('VIEW', ?, ?) AS DDL_TEXT FROM DUAL";
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setString(1, viewName);
+            ps.setString(2, schema);
+            try (ResultSet rs = ps.executeQuery()) {
+                if (rs.next()) {
+                    java.sql.Clob clob = rs.getClob("DDL_TEXT");
+                    if (clob != null) {
+                        long length = clob.length();
+                        if (length > 0 && length < 2_000_000) {
                             return clob.getSubString(1, (int) length).trim();
                         }
                     }

@@ -3,8 +3,11 @@ package org.example.migrationdbweb.controller;
 import java.util.Map;
 
 import org.example.migrationdbweb.dto.MigrationRequest;
+import org.example.migrationdbweb.dto.SavedCredentialRequest;
 import org.example.migrationdbweb.service.MigrationWebWorkerService;
+import org.example.migrationdbweb.service.SavedCredentialService;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.CrossOrigin;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -20,6 +23,9 @@ public class MigrationController {
 
     @Autowired
     private MigrationWebWorkerService migrationService;
+
+    @Autowired
+    private SavedCredentialService savedCredentialService;
 
     @PostMapping("/start")
     public ResponseEntity<?> startMigration(@RequestBody MigrationRequest request) {
@@ -52,5 +58,34 @@ public class MigrationController {
             return ResponseEntity.ok(result);
         }
         return ResponseEntity.badRequest().body(result);
+    }
+
+    @GetMapping("/credentials")
+    public ResponseEntity<?> listSavedCredentials() {
+        try {
+            return ResponseEntity.ok(savedCredentialService.listCredentials());
+        } catch (IllegalStateException e) {
+            return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE)
+                    .body(Map.of("message", e.getMessage()));
+        }
+    }
+
+    @PostMapping("/credentials")
+    public ResponseEntity<?> saveCredential(@RequestBody SavedCredentialRequest request) {
+        if (request == null || request.getConfig() == null) {
+            return ResponseEntity.badRequest().body(Map.of("message", "Thieu thong tin credential de luu."));
+        }
+        if (request.getName() == null || request.getName().isBlank()) {
+            return ResponseEntity.badRequest().body(Map.of("message", "Ten goi y de luu credential la bat buoc."));
+        }
+
+        try {
+            return ResponseEntity.ok(savedCredentialService.saveCredential(request.getName(), request.getConfig()));
+        } catch (IllegalArgumentException e) {
+            return ResponseEntity.badRequest().body(Map.of("message", e.getMessage()));
+        } catch (IllegalStateException e) {
+            return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE)
+                    .body(Map.of("message", e.getMessage()));
+        }
     }
 }

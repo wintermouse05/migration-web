@@ -722,6 +722,22 @@ public class MigrationWorker extends SwingWorker<Void, String> {
         return normalized;
     }
 
+    private static String normalizeRoutineSqlForJdbc(String sql, SqlDialect targetDialect) {
+        String normalized = sql == null ? "" : sql.trim();
+        if (normalized.isEmpty()) {
+            return normalized;
+        }
+
+        if (targetDialect instanceof OracleDialect) {
+            while (normalized.endsWith("/")) {
+                normalized = normalized.substring(0, normalized.length() - 1).trim();
+            }
+            return normalized;
+        }
+
+        return normalizeSqlForJdbc(normalized);
+    }
+
     private static boolean isTableAlreadyExistsError(SQLException e) {
         String sqlState = e.getSQLState();
         String message = e.getMessage() == null ? "" : e.getMessage().toLowerCase(Locale.ROOT);
@@ -970,7 +986,7 @@ public class MigrationWorker extends SwingWorker<Void, String> {
                 for (String sql : stmts) {
                     if (sql == null || sql.isBlank()) continue;
                     try {
-                        stmt.execute(normalizeSqlForJdbc(sql));
+                        stmt.execute(normalizeRoutineSqlForJdbc(sql, targetDialect));
                         publish("  -> Da tao " + fn.getFunctionType() + ": " + fn.getFunctionName());
                     } catch (SQLException e) {
                         if (isFunctionAlreadyExistsError(e)) {
@@ -1321,7 +1337,9 @@ public class MigrationWorker extends SwingWorker<Void, String> {
         String message = e.getMessage() == null ? "" : e.getMessage().toLowerCase(Locale.ROOT);
         return "42P07".equals(sqlState)   // PostgreSQL
                 || message.contains("already exists")
-                || message.contains("duplicate key");
+                || message.contains("duplicate key")
+                || message.contains("already indexed")
+                || message.contains("ora-01408");
     }
 
     private static boolean isViewAlreadyExistsError(SQLException e) {

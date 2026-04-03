@@ -268,6 +268,16 @@ public class PostgresDialect implements SqlDialect {
         List<String> stmts = new ArrayList<>();
         if (trig == null) return stmts;
 
+        if (trig.getSourceDialect() == DatabaseType.POSTGRESQL
+                && trig.getFunctionDdl() != null && !trig.getFunctionDdl().isBlank()
+                && trig.getDdlText() != null && !trig.getDdlText().isBlank()) {
+            String functionDdl = remapSchemaPrefix(trig.getFunctionDdl(), trig.getSourceSchema(), trig.getTargetSchema());
+            String triggerDdl = remapSchemaPrefix(trig.getDdlText(), trig.getSourceSchema(), trig.getTargetSchema());
+            stmts.add(functionDdl.trim());
+            stmts.add(triggerDdl.trim());
+            return stmts;
+        }
+
         String functionBody;
         if (transformer != null && trig.getSourceDialect() == DatabaseType.ORACLE) {
             // Transform Oracle → PostgreSQL
@@ -348,6 +358,13 @@ public class PostgresDialect implements SqlDialect {
         List<String> stmts = new ArrayList<>();
         if (fn == null) return stmts;
 
+        if (fn.getSourceDialect() == DatabaseType.POSTGRESQL
+                && fn.getDdlText() != null && !fn.getDdlText().isBlank()) {
+            String ddl = remapSchemaPrefix(fn.getDdlText(), fn.getSourceSchema(), fn.getTargetSchema());
+            stmts.add(ddl.trim());
+            return stmts;
+        }
+
         String functionBody;
         if (transformer != null && fn.getSourceDialect() == DatabaseType.ORACLE) {
             functionBody = transformer.transform(stripOracleCreateLine(fn.getFunctionBody()));
@@ -407,6 +424,24 @@ public class PostgresDialect implements SqlDialect {
 
         stmts.add(sb.toString());
         return stmts;
+    }
+
+    private static String remapSchemaPrefix(String ddl, String sourceSchema, String targetSchema) {
+        if (ddl == null || ddl.isBlank()) {
+            return ddl;
+        }
+        if (sourceSchema == null || targetSchema == null || sourceSchema.equalsIgnoreCase(targetSchema)) {
+            return ddl;
+        }
+        String remapped = ddl.replaceAll(
+                "(?i)\\b" + java.util.regex.Pattern.quote(sourceSchema) + "\\b\\s*\\.",
+                targetSchema + "."
+        );
+        remapped = remapped.replaceAll(
+                "(?i)\"\\s*" + java.util.regex.Pattern.quote(sourceSchema) + "\\s*\"\\s*\\.",
+                "\"" + targetSchema + "\"."
+        );
+        return remapped;
     }
 
     /**

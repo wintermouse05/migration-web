@@ -115,16 +115,41 @@ public class DataTransferService {
             int startOffset,
             TransferProgressListener progressListener
     ) throws SQLException {
+            return transferTableDataInternal(
+                sourceConn,
+                targetConn,
+                table,
+                batchSize,
+                limitRows,
+                copyNewOnly,
+                startOffset,
+                progressListener,
+                true
+            );
+            }
+
+            private TransferResult transferTableDataInternal(
+                Connection sourceConn,
+                Connection targetConn,
+                TableDefinition table,
+                int batchSize,
+                Integer limitRows,
+                boolean copyNewOnly,
+                int startOffset,
+                TransferProgressListener progressListener,
+                boolean allowDuplicateFallback
+            ) throws SQLException {
 
         int safeStartOffset = Math.max(0, startOffset);
-        boolean canResumeByOffset = safeStartOffset > 0 && !table.getPrimaryKeys().isEmpty();
-        if (safeStartOffset > 0 && !canResumeByOffset) {
+        boolean hasPrimaryKey = !table.getPrimaryKeys().isEmpty();
+        if (safeStartOffset > 0 && !hasPrimaryKey) {
             System.out.println("Bang " + table.getTableName()
                     + " khong co PK, khong the resume theo offset an toan. Bat dau lai tu dau bang.");
             safeStartOffset = 0;
         }
 
-        String selectSql = sqlGenerator.buildSelectSql(table, canResumeByOffset);
+        // Luon ORDER BY PK neu bang co PK de thu tu doc on dinh giua cac lan retry/resume.
+        String selectSql = sqlGenerator.buildSelectSql(table, hasPrimaryKey);
         String insertSql = sqlGenerator.buildInsertSql(table);
         String existsByPkSql = null;
         int[] pkColumnIndexes = new int[0];
@@ -163,6 +188,7 @@ public class DataTransferService {
                 int totalSkipped = 0;
                 int currentBatchCount = 0;
                 boolean limitReached = false;
+                int sourceRowsRead = 0;
 
                 int skippedByOffset = 0;
                 while (skippedByOffset < safeStartOffset && rs.next()) {
@@ -173,6 +199,7 @@ public class DataTransferService {
                 }
 
                 while (rs.next()) {
+                    sourceRowsRead++;
                     if (safeLimitRows != null && totalTransferred >= safeLimitRows) {
                         limitReached = true;
                         break;
@@ -225,6 +252,12 @@ public class DataTransferService {
                     System.out.println("  -> Đã copy " + totalTransferred + " rows...");
                 }
 
+                if (sourceRowsRead == 0) {
+                    System.err.println("[DATA-WARN] Bang " + table.getTableName()
+                            + " khong co dong nao tu source query."
+                            + " Kiem tra schema/DB name va du lieu nguon. SQL=" + selectSql);
+                }
+
                 System.out.println("Hoàn tất! Tổng cộng: " + totalTransferred + " rows cho bảng " + table.getTableName());
                 return new TransferResult(safeStartOffset, totalTransferred, totalSkipped, limitReached);
             }
@@ -232,6 +265,27 @@ public class DataTransferService {
         } catch (SQLException e) {
             // Rollback nếu có lỗi xảy ra đềEđảm bảo tính toàn vẹn dữ liệu
             targetConn.rollback();
+
+            if (allowDuplicateFallback
+                && !copyNewOnly
+                && !table.getPrimaryKeys().isEmpty()
+                && isDuplicateKeyViolation(e)) {
+            System.err.println("[DATA-WARN] Bang " + table.getTableName()
+                + " gap duplicate key (vi du ORA-00001)."
+                + " Thu lai voi che do copyNewOnly=true de bo qua ban ghi da ton tai theo PK.");
+            return transferTableDataInternal(
+                sourceConn,
+                targetConn,
+                table,
+                batchSize,
+                limitRows,
+                true,
+                startOffset,
+                progressListener,
+                false
+            );
+            }
+
             System.err.println("Lỗi khi transfer dữ liệu bảng " + table.getTableName()
                     + ". Đã rollback! SQLState=" + e.getSQLState()
                     + ", ErrorCode=" + e.getErrorCode()
@@ -243,6 +297,31 @@ public class DataTransferService {
             sourceConn.setAutoCommit(originalSourceAutoCommit);
             targetConn.setAutoCommit(originalTargetAutoCommit);
         }
+    }
+
+    private static boolean isDuplicateKeyViolation(SQLException e) {
+        SQLException current = e;
+        while (current != null) {
+            String sqlState = current.getSQLState();
+            int errorCode = current.getErrorCode();
+            String message = current.getMessage() == null ? "" : current.getMessage().toLowerCase();
+
+            if ("23505".equals(sqlState)
+                    || "23000".equals(sqlState)
+                    || errorCode == 1
+                    || message.contains("ora-00001")
+                    || (message.contains("unique") && message.contains("constraint"))
+                    || message.contains("duplicate key")) {
+                return true;
+            }
+
+            SQLException next = current.getNextException();
+            if (next == null && current.getCause() instanceof SQLException causeSql) {
+                next = causeSql;
+            }
+            current = next;
+        }
+        return false;
     }
 
     private void executeBatchWithRetry(

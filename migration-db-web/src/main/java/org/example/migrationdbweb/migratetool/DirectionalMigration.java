@@ -667,7 +667,7 @@ public abstract class DirectionalMigration {
                         List<String> fnSqls = targetDialect.buildCreateFunctionSql(fn, transformer);
                         for (String fnSql : fnSqls) {
                             if (fnSql == null || fnSql.isBlank()) continue;
-                            String normalized = normalizeSqlForJdbc(fnSql);
+                            String normalized = normalizeRoutineSqlForJdbc(fnSql, targetDialect);
                             try {
                                 st.execute(normalized);
                                 System.out.println("Created function: " + fn.getFunctionName());
@@ -1042,6 +1042,22 @@ public abstract class DirectionalMigration {
             return normalized.substring(0, normalized.length() - 1);
         }
         return normalized;
+    }
+
+    private static String normalizeRoutineSqlForJdbc(String sql, SqlDialect targetDialect) {
+        String normalized = sql == null ? "" : sql.trim();
+        if (normalized.isEmpty()) {
+            return normalized;
+        }
+
+        if (targetDialect instanceof OracleDialect) {
+            while (normalized.endsWith("/")) {
+                normalized = normalized.substring(0, normalized.length() - 1).trim();
+            }
+            return normalized;
+        }
+
+        return normalizeSqlForJdbc(normalized);
     }
 
     private static boolean isTableAlreadyExistsError(SQLException e) {

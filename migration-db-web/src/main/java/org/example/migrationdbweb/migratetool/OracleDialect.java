@@ -4,7 +4,6 @@ import java.sql.Types;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
-import java.util.regex.Pattern;
 
 public class OracleDialect implements SqlDialect {
 
@@ -231,10 +230,7 @@ public class OracleDialect implements SqlDialect {
             // DDL gốc có sẵn — chỉ replace schema nếu cần
             if (trig.getSourceSchema() != null && trig.getTargetSchema() != null
                     && !trig.getSourceSchema().equalsIgnoreCase(trig.getTargetSchema())) {
-                ddl = ddl.replaceAll(
-                        "(?i)" + Pattern.quote(trig.getSourceSchema()) + "\\.",
-                        trig.getTargetSchema() + "."
-                );
+                ddl = remapSchemaPrefixSafely(ddl, trig.getSourceSchema(), trig.getTargetSchema());
             }
         }
 
@@ -322,10 +318,7 @@ public class OracleDialect implements SqlDialect {
             String targetSchema = viewDef.getTargetSchema();
             if (sourceSchema != null && targetSchema != null
                     && !sourceSchema.equalsIgnoreCase(targetSchema)) {
-                select = select.replaceAll(
-                        "(?i)" + Pattern.quote(sourceSchema) + "\\.",
-                        targetSchema + "."
-                );
+                select = remapSchemaPrefixSafely(select, sourceSchema, targetSchema);
             }
 
             StringBuilder sql = new StringBuilder();
@@ -340,7 +333,8 @@ public class OracleDialect implements SqlDialect {
         }
 
         // Oracle USER_VIEWS.TEXT chứa "CREATE [OR REPLACE] ... VIEW ... AS SELECT ..."
-        // Đã là DDL đầy đủ, chỉ cần xử lý schema replacement + cleanup
+        // hoặc chỉ chứa SELECT clause tùy cách parse metadata.
+        // Nếu chỉ là SELECT clause thì phải build lại CREATE OR REPLACE VIEW.
         String text = viewDef.getSelectClause();
         if (text == null || text.isBlank()) {
             return null;
@@ -352,11 +346,7 @@ public class OracleDialect implements SqlDialect {
         String targetSchema = viewDef.getTargetSchema();
         if (sourceSchema != null && targetSchema != null
                 && !sourceSchema.equalsIgnoreCase(targetSchema)) {
-            // Replace "SOURCE_SCHEMA." thành "TARGET_SCHEMA."
-            text = text.replaceAll(
-                    "(?i)" + Pattern.quote(sourceSchema) + "\\.",
-                    targetSchema + "."
-            );
+            text = remapSchemaPrefixSafely(text, sourceSchema, targetSchema);
         }
 
         // Oracle TEXT có thể kết thúc bằng dấu ;
@@ -364,7 +354,21 @@ public class OracleDialect implements SqlDialect {
             text = text.substring(0, text.length() - 1);
         }
 
-        return text;
+        String upper = text.toUpperCase(Locale.ROOT);
+        boolean looksLikeCreateView = upper.startsWith("CREATE ") && upper.contains(" VIEW ");
+        if (looksLikeCreateView) {
+            return text;
+        }
+
+        StringBuilder sql = new StringBuilder();
+        sql.append("CREATE OR REPLACE VIEW ");
+        sql.append(quoteIdentifier(viewDef.getViewName()));
+        sql.append(" AS\n");
+        sql.append(text);
+        if (viewDef.getCheckOption() != null && !viewDef.getCheckOption().isBlank()) {
+            sql.append("\nWITH ").append(viewDef.getCheckOption()).append(" CHECK OPTION");
+        }
+        return sql.toString();
     }
 
 	// ─── FUNCTION / PROCEDURE DDL ──────────────────────────────
@@ -373,6 +377,16 @@ public class OracleDialect implements SqlDialect {
 	public List<String> buildCreateFunctionSql(FunctionDefinition fn, OracleToPgsqlTransformer transformer) {
 		List<String> stmts = new ArrayList<>();
 		if (fn == null) return stmts;
+
+        if (fn.getSourceDialect() == DatabaseType.ORACLE
+                && fn.getDdlText() != null && !fn.getDdlText().isBlank()) {
+            String ddl = remapOracleSchemaPrefix(fn.getDdlText(), fn.getSourceSchema(), fn.getTargetSchema());
+            ddl = stripSqlPlusDelimiter(ddl);
+            if (ddl != null && !ddl.isBlank()) {
+                stmts.add(ddl.trim());
+                return stmts;
+            }
+        }
 
 		String body = fn.getFunctionBody();
 		if (body == null || body.isBlank()) {
@@ -385,6 +399,8 @@ public class OracleDialect implements SqlDialect {
             for (String warning : PostgresToOracleTransformer.detectUnsupportedFeatures(body)) {
                 System.err.println("  [PG2ORA-FUNCTION-WARN] " + fn.getFunctionName() + ": " + warning);
             }
+        } else if (fn.getSourceDialect() == DatabaseType.ORACLE) {
+            body = stripOracleRoutineHeader(body);
         }
 
 		StringBuilder sb = new StringBuilder();
@@ -427,6 +443,266 @@ public class OracleDialect implements SqlDialect {
 		stmts.add(sb.toString());
 		return stmts;
 	}
+
+    private static String remapOracleSchemaPrefix(String ddl, String sourceSchema, String targetSchema) {
+        return remapSchemaPrefixSafely(ddl, sourceSchema, targetSchema);
+    }
+
+    public static String remapSchemaPrefixSafely(String text, String sourceSchema, String targetSchema) {
+        if (text == null || text.isBlank()) {
+            return text;
+        }
+        if (sourceSchema == null || sourceSchema.isBlank()
+                || targetSchema == null || targetSchema.isBlank()
+                || sourceSchema.equalsIgnoreCase(targetSchema)) {
+            return text;
+        }
+
+        String source = sourceSchema.trim();
+        String sourceUpper = source.toUpperCase(Locale.ROOT);
+        String target = targetSchema.trim();
+
+        StringBuilder out = new StringBuilder(text.length() + 32);
+        int i = 0;
+        boolean inSingleQuote = false;
+        boolean inLineComment = false;
+        boolean inBlockComment = false;
+
+        while (i < text.length()) {
+            char c = text.charAt(i);
+
+            if (inLineComment) {
+                out.append(c);
+                i++;
+                if (c == '\n') {
+                    inLineComment = false;
+                }
+                continue;
+            }
+
+            if (inBlockComment) {
+                out.append(c);
+                i++;
+                if (c == '*' && i < text.length() && text.charAt(i) == '/') {
+                    out.append('/');
+                    i++;
+                    inBlockComment = false;
+                }
+                continue;
+            }
+
+            if (inSingleQuote) {
+                out.append(c);
+                i++;
+                if (c == '\'' && i < text.length() && text.charAt(i) == '\'') {
+                    out.append('\'');
+                    i++;
+                    continue;
+                }
+                if (c == '\'') {
+                    inSingleQuote = false;
+                }
+                continue;
+            }
+
+            if (c == '\'') {
+                inSingleQuote = true;
+                out.append(c);
+                i++;
+                continue;
+            }
+
+            if (c == '-' && i + 1 < text.length() && text.charAt(i + 1) == '-') {
+                inLineComment = true;
+                out.append("--");
+                i += 2;
+                continue;
+            }
+
+            if (c == '/' && i + 1 < text.length() && text.charAt(i + 1) == '*') {
+                inBlockComment = true;
+                out.append("/*");
+                i += 2;
+                continue;
+            }
+
+            Match match = matchSchemaPrefix(text, i, sourceUpper, target);
+            if (match != null) {
+                out.append(match.replacement);
+                i = match.nextIndex;
+                continue;
+            }
+
+            out.append(c);
+            i++;
+        }
+
+        return out.toString();
+    }
+
+    private static Match matchSchemaPrefix(String text, int start, String sourceUpper, String targetSchema) {
+        Match quoted = matchQuotedSchemaPrefix(text, start, sourceUpper, targetSchema);
+        if (quoted != null) {
+            return quoted;
+        }
+        return matchUnquotedSchemaPrefix(text, start, sourceUpper, targetSchema);
+    }
+
+    private static Match matchQuotedSchemaPrefix(String text, int start, String sourceUpper, String targetSchema) {
+        if (start >= text.length() || text.charAt(start) != '"') {
+            return null;
+        }
+
+        int endQuote = findClosingQuote(text, start + 1);
+        if (endQuote < 0) {
+            return null;
+        }
+
+        String identifier = text.substring(start + 1, endQuote);
+        if (!identifier.equalsIgnoreCase(sourceUpper)) {
+            return null;
+        }
+
+        int pos = endQuote + 1;
+        while (pos < text.length() && Character.isWhitespace(text.charAt(pos))) {
+            pos++;
+        }
+        if (pos >= text.length() || text.charAt(pos) != '.') {
+            return null;
+        }
+        pos++;
+        while (pos < text.length() && Character.isWhitespace(text.charAt(pos))) {
+            pos++;
+        }
+
+        return new Match(pos, "\"" + targetSchema.toUpperCase(Locale.ROOT) + "\".");
+    }
+
+    private static int findClosingQuote(String text, int start) {
+        int i = start;
+        while (i < text.length()) {
+            char c = text.charAt(i);
+            if (c == '"') {
+                if (i + 1 < text.length() && text.charAt(i + 1) == '"') {
+                    i += 2;
+                    continue;
+                }
+                return i;
+            }
+            i++;
+        }
+        return -1;
+    }
+
+    private static Match matchUnquotedSchemaPrefix(String text, int start, String sourceUpper, String targetSchema) {
+        int len = sourceUpper.length();
+        if (start + len > text.length()) {
+            return null;
+        }
+
+        if (!text.regionMatches(true, start, sourceUpper, 0, len)) {
+            return null;
+        }
+
+        int before = start - 1;
+        if (before >= 0 && isIdentifierChar(text.charAt(before))) {
+            return null;
+        }
+
+        int pos = start + len;
+        if (pos < text.length() && isIdentifierChar(text.charAt(pos))) {
+            return null;
+        }
+
+        while (pos < text.length() && Character.isWhitespace(text.charAt(pos))) {
+            pos++;
+        }
+        if (pos >= text.length() || text.charAt(pos) != '.') {
+            return null;
+        }
+        pos++;
+        while (pos < text.length() && Character.isWhitespace(text.charAt(pos))) {
+            pos++;
+        }
+
+        return new Match(pos, targetSchema + ".");
+    }
+
+    private static boolean isIdentifierChar(char c) {
+        return Character.isLetterOrDigit(c) || c == '_' || c == '$' || c == '#';
+    }
+
+    private static final class Match {
+        private final int nextIndex;
+        private final String replacement;
+
+        private Match(int nextIndex, String replacement) {
+            this.nextIndex = nextIndex;
+            this.replacement = replacement;
+        }
+    }
+
+    private static String stripSqlPlusDelimiter(String ddl) {
+        if (ddl == null) {
+            return null;
+        }
+        String normalized = ddl.trim();
+        if (normalized.endsWith("/")) {
+            normalized = normalized.substring(0, normalized.length() - 1).trim();
+        }
+        return normalized;
+    }
+
+    private static String stripOracleRoutineHeader(String body) {
+        if (body == null || body.isBlank()) {
+            return body;
+        }
+
+        String trimmed = body.trim();
+        int delimiterPos = findHeaderBodyDelimiter(trimmed);
+        if (delimiterPos < 0) {
+            return trimmed;
+        }
+
+        String afterDelimiter = trimmed.substring(delimiterPos + 2).trim();
+        if (afterDelimiter.startsWith(";")) {
+            afterDelimiter = afterDelimiter.substring(1).trim();
+        }
+        return afterDelimiter;
+    }
+
+    private static int findHeaderBodyDelimiter(String text) {
+        int len = text.length();
+        boolean inString = false;
+
+        for (int i = 0; i <= len - 2; i++) {
+            char current = text.charAt(i);
+            if (current == '\'') {
+                if (inString && i + 1 < len && text.charAt(i + 1) == '\'') {
+                    i++;
+                    continue;
+                }
+                inString = !inString;
+                continue;
+            }
+
+            if (inString) {
+                continue;
+            }
+
+            if (text.regionMatches(true, i, "AS", 0, 2) || text.regionMatches(true, i, "IS", 0, 2)) {
+                int before = i - 1;
+                int after = i + 2;
+                boolean validBefore = before < 0 || !Character.isLetterOrDigit(text.charAt(before)) && text.charAt(before) != '_';
+                boolean validAfter = after >= len || !Character.isLetterOrDigit(text.charAt(after)) && text.charAt(after) != '_';
+                if (validBefore && validAfter) {
+                    return i;
+                }
+            }
+        }
+
+        return -1;
+    }
 
     private static String mapPostgresTypeToOracle(String dataType) {
         if (dataType == null || dataType.isBlank()) {
