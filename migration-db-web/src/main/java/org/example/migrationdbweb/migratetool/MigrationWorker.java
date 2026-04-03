@@ -3,13 +3,20 @@ import java.sql.Connection;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.CompletionService;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorCompletionService;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 
 import javax.swing.SwingWorker;
 
@@ -24,6 +31,7 @@ public class MigrationWorker extends SwingWorker<Void, String> {
     private final String sourceSchema;
     private final String targetSchema;
     private final int batchSize;
+    private final int dataThreadCount;
     private final boolean truncateTarget;
     private final boolean copyNewOnly;
     private final Integer limitRows;
@@ -57,6 +65,7 @@ public class MigrationWorker extends SwingWorker<Void, String> {
             String sourceSchema,
             String targetSchema,
             int batchSize,
+            int dataThreadCount,
             boolean truncateTarget,
             boolean copyNewOnly,
             Integer limitRows,
@@ -80,6 +89,7 @@ public class MigrationWorker extends SwingWorker<Void, String> {
         this.sourceSchema = sourceSchema;
         this.targetSchema = targetSchema;
         this.batchSize = Math.max(1, batchSize);
+        this.dataThreadCount = Math.max(0, dataThreadCount);
         this.truncateTarget = truncateTarget;
         this.copyNewOnly = copyNewOnly;
         this.limitRows = (limitRows != null && limitRows > 0) ? limitRows : null;
@@ -129,6 +139,8 @@ public class MigrationWorker extends SwingWorker<Void, String> {
                 publish("Source URL: " + sourceConn.getMetaData().getURL());
                 publish("Target URL: " + targetConn.getMetaData().getURL());
                 publish("Schema nguồn: " + sourceSchema + " | Schema đích: " + targetSchema);
+                configurePostgresSchema(sourceConn, sourceConfig, sourceSchema, false);
+                configurePostgresSchema(targetConn, targetConfig, targetSchema, true);
                 publish("Tùy chọn: truncate=" + truncateTarget
                     + ", copyNewOnly=" + copyNewOnly
                     + ", limit=" + (limitRows == null ? "ALL" : limitRows));
@@ -241,7 +253,6 @@ public class MigrationWorker extends SwingWorker<Void, String> {
                 if (!isStructureOnly) {
                     publish("--- BẮT ĐẦU CHUYềE DỮ LIềE (DML) ---");
                     SqlGenerator sqlGenerator = new SqlGenerator(sourceDialect, targetDialect);
-                    DataTransferService transferService = new DataTransferService(sqlGenerator);
 
                     if (truncateTarget) {
                         publish("--- TRUNCATE DỮ LIềE CŨ TRÊN TARGET ---");
@@ -252,48 +263,14 @@ public class MigrationWorker extends SwingWorker<Void, String> {
                         }
                     }
 
-                    for (int i = 0; i < totalTables; i++) {
-                        ensureNotCancelled();
-                        TableDefinition table = allTables.get(i);
-
-                        boolean effectiveCopyNewOnly = copyNewOnly
-                            || (retryPolicy.isResumeEnabled() && !table.getPrimaryKeys().isEmpty());
-
-                        if (checkpointStore != null && checkpointStore.isTableCompleted(table.getTableName())) {
-                            publish("  -> Bo qua bang da migrate truoc do (resume): " + table.getTableName());
-                            setProgress(60 + (int) (((i + 1) * 30.0f / totalTables)));
-                            continue;
-                        }
-
-                        int startOffset = checkpointStore == null ? 0 : checkpointStore.getTableOffset(table.getTableName());
-                        if (startOffset > 0) {
-                            publish("  -> Resume bang " + table.getTableName() + " tu offset " + startOffset + ".");
-                        }
-
-                        if (effectiveCopyNewOnly && table.getPrimaryKeys().isEmpty()) {
-                            publish("  -> Bảng " + table.getTableName() + " không có PK, copyNewOnly không thềElọc trùng theo PK.");
-                        }
-
-                        publish("Đang sao chép dữ liệu bảng " + table.getTableName() + "...");
-                        DataTransferService.TransferResult result = transferTableWithRetry(
+                    runDataMigrationPhaseMultiThread(
                             manager,
                             sourcePoolId,
                             targetPoolId,
-                            transferService,
-                            table,
-                            effectiveCopyNewOnly,
-                            checkpointStore,
-                            startOffset
-                        );
-                        if (checkpointStore != null) {
-                            checkpointStore.markTableCompleted(table.getTableName(), result.getTransferredRows());
-                        }
-                        publish("  -> Hoan tat bang " + table.getTableName()
-                                + " | copied=" + result.getTransferredRows()
-                                + " | skipped=" + result.getSkippedRows()
-                                + (result.isLimitReached() ? " | dat nguong limit" : ""));
-                        setProgress(60 + (int) ( (i + 1) * 30.0f / totalTables));
-                    }
+                            sqlGenerator,
+                            allTables,
+                            checkpointStore
+                    );
                 } else {
                     publish("Bo qua buoc chuyen du lieu do chon che do Structure Only.");
                     setProgress(90);
@@ -556,11 +533,11 @@ public class MigrationWorker extends SwingWorker<Void, String> {
                 continue;
             }
 
-            if (!includeTables.isEmpty() && !includeTables.contains(normalized)) {
+            if (!includeTables.isEmpty() && !matchesAnyWildcardPattern(normalized, includeTables)) {
                 continue;
             }
 
-            if (excludeTables.contains(normalized)) {
+            if (matchesAnyWildcardPattern(normalized, excludeTables)) {
                 continue;
             }
 
@@ -585,6 +562,224 @@ public class MigrationWorker extends SwingWorker<Void, String> {
         return normalized;
     }
 
+    private boolean matchesAnyWildcardPattern(String normalizedObjectName, Set<String> patterns) {
+        if (patterns == null || patterns.isEmpty()) {
+            return false;
+        }
+
+        for (String pattern : patterns) {
+            if (matchesWildcardPattern(normalizedObjectName, pattern)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private boolean matchesWildcardPattern(String normalizedObjectName, String rawPattern) {
+        if (normalizedObjectName == null || rawPattern == null) {
+            return false;
+        }
+
+        String normalizedPattern = rawPattern.trim().toUpperCase(Locale.ROOT);
+        if (normalizedPattern.isEmpty()) {
+            return false;
+        }
+
+        if (!normalizedPattern.contains("*")) {
+            return normalizedObjectName.equals(normalizedPattern);
+        }
+
+        StringBuilder regex = new StringBuilder("^");
+        for (int i = 0; i < normalizedPattern.length(); i++) {
+            char ch = normalizedPattern.charAt(i);
+            if (ch == '*') {
+                regex.append(".*");
+            } else {
+                regex.append(java.util.regex.Pattern.quote(String.valueOf(ch)));
+            }
+        }
+        regex.append("$");
+
+        return java.util.regex.Pattern.compile(regex.toString()).matcher(normalizedObjectName).matches();
+    }
+
+    private void runDataMigrationPhaseMultiThread(
+            ConnectionManager manager,
+            String sourcePoolId,
+            String targetPoolId,
+            SqlGenerator sqlGenerator,
+            List<TableDefinition> allTables,
+            MigrationCheckpointStore checkpointStore
+    ) throws SQLException {
+        List<TableDefinition> plannedTables = new ArrayList<>(allTables);
+        plannedTables.sort(Comparator.comparing(TableDefinition::getTableName, String.CASE_INSENSITIVE_ORDER));
+
+        List<TableDefinition> runnableTables = new ArrayList<>();
+        for (TableDefinition table : plannedTables) {
+            if (checkpointStore != null && checkpointStore.isTableCompleted(table.getTableName())) {
+                publish("  -> Bo qua bang da migrate truoc do (resume): " + table.getTableName());
+                continue;
+            }
+            runnableTables.add(table);
+        }
+
+        if (runnableTables.isEmpty()) {
+            publish("Tat ca bang da hoan tat theo checkpoint. Bo qua phase data.");
+            setProgress(90);
+            return;
+        }
+
+        int threadCount = resolveDataMigrationThreadCount(runnableTables.size());
+        publish("Data phase multithread: " + threadCount + " thread(s), " + runnableTables.size() + " bang can migrate.");
+
+        ExecutorService executor = Executors.newFixedThreadPool(threadCount);
+        CompletionService<TableTransferOutcome> completionService = new ExecutorCompletionService<>(executor);
+        int submitted = 0;
+
+        for (TableDefinition table : runnableTables) {
+            final String tableName = table.getTableName();
+            final int startOffset = checkpointStore == null ? 0 : checkpointStore.getTableOffset(tableName);
+            final boolean effectiveCopyNewOnly = copyNewOnly
+                    || (retryPolicy.isResumeEnabled() && !table.getPrimaryKeys().isEmpty());
+
+            if (startOffset > 0) {
+                publish("  -> Resume bang " + tableName + " tu offset " + startOffset + ".");
+            }
+
+            if (effectiveCopyNewOnly && table.getPrimaryKeys().isEmpty()) {
+                publish("  -> Bang " + tableName + " khong co PK, copyNewOnly khong the loc trung theo PK.");
+            }
+
+            completionService.submit(() -> {
+                if (isCancelled()) {
+                    return TableTransferOutcome.failed(tableName, "Tien trinh da bi huy.");
+                }
+
+                try {
+                    DataTransferService transferService = new DataTransferService(sqlGenerator, retryPolicy);
+                    publish("Dang sao chep du lieu bang " + tableName + "...");
+
+                    DataTransferService.TransferResult result = transferTableWithRetry(
+                            manager,
+                            sourcePoolId,
+                            targetPoolId,
+                            transferService,
+                            table,
+                            effectiveCopyNewOnly,
+                            checkpointStore,
+                            startOffset
+                    );
+
+                    if (checkpointStore != null) {
+                        if (result.isLimitReached()) {
+                            checkpointStore.updateTableOffset(tableName, result.getTransferredRows());
+                        } else {
+                            checkpointStore.markTableCompleted(tableName, result.getTransferredRows());
+                        }
+                    }
+
+                    return TableTransferOutcome.success(
+                            tableName,
+                            result.getTransferredRows(),
+                            result.getSkippedRows(),
+                            result.isLimitReached()
+                    );
+                } catch (SQLException | RuntimeException ex) {
+                    return TableTransferOutcome.failed(tableName, ex.getMessage());
+                }
+            });
+
+            submitted++;
+        }
+
+        SQLException firstFailure = null;
+        int completed = 0;
+
+        try {
+            for (int i = 0; i < submitted; i++) {
+                ensureNotCancelled();
+                Future<TableTransferOutcome> future = completionService.take();
+                TableTransferOutcome outcome = future.get();
+
+                if (!outcome.success()) {
+                    if (firstFailure == null) {
+                        firstFailure = new SQLException(
+                                "Khong the migrate bang " + outcome.tableName() + ": " + outcome.errorMessage()
+                        );
+                    }
+                    publish("  -> LOI bang " + outcome.tableName() + ": " + outcome.errorMessage());
+                } else {
+                    publish("  -> Hoan tat bang " + outcome.tableName()
+                            + " | copied=" + outcome.transferredRows()
+                            + " | skipped=" + outcome.skippedRows()
+                            + (outcome.limitReached() ? " | dat nguong limit" : ""));
+                }
+
+                completed++;
+                setProgress(60 + (int) ((completed * 30.0f) / Math.max(1, submitted)));
+            }
+        } catch (InterruptedException ex) {
+            Thread.currentThread().interrupt();
+            throw new SQLException("Bi ngat trong khi cho cac task migrate du lieu hoan tat.", ex);
+        } catch (ExecutionException ex) {
+            throw new SQLException("Task migrate du lieu gap loi thuc thi: " + ex.getMessage(), ex);
+        } finally {
+            executor.shutdownNow();
+            try {
+                executor.awaitTermination(10, TimeUnit.SECONDS);
+            } catch (InterruptedException ex) {
+                Thread.currentThread().interrupt();
+            }
+        }
+
+        if (firstFailure != null) {
+            throw firstFailure;
+        }
+    }
+
+    private int resolveDataMigrationThreadCount(int tableCount) {
+        int sourcePool = sourceConfig == null ? 10 : Math.max(1, sourceConfig.getMaximumPoolSize());
+        int targetPool = targetConfig == null ? 10 : Math.max(1, targetConfig.getMaximumPoolSize());
+        int maxByPool = Math.max(1, Math.min(sourcePool, targetPool) - 2);
+        int maxByTable = Math.max(1, tableCount);
+
+        if (dataThreadCount > 0) {
+            return Math.max(1, Math.min(dataThreadCount, Math.min(maxByPool, maxByTable)));
+        }
+
+        int suggested = Math.min(4, maxByTable);
+        return Math.max(1, Math.min(suggested, maxByPool));
+    }
+
+    private record TableTransferOutcome(
+            String tableName,
+            int transferredRows,
+            int skippedRows,
+            boolean limitReached,
+            boolean success,
+            String errorMessage
+    ) {
+        private static TableTransferOutcome success(
+                String tableName,
+                int transferredRows,
+                int skippedRows,
+                boolean limitReached
+        ) {
+            return new TableTransferOutcome(tableName, transferredRows, skippedRows, limitReached, true, null);
+        }
+
+        private static TableTransferOutcome failed(String tableName, String errorMessage) {
+            return new TableTransferOutcome(
+                    tableName,
+                    0,
+                    0,
+                    false,
+                    false,
+                    errorMessage == null ? "unknown error" : errorMessage
+            );
+        }
+    }
+
     private DataTransferService.TransferResult transferTableWithRetry(
             ConnectionManager manager,
             String sourcePoolId,
@@ -603,6 +798,9 @@ public class MigrationWorker extends SwingWorker<Void, String> {
 
             try (Connection transferSourceConn = manager.getConnection(sourcePoolId);
                  Connection transferTargetConn = manager.getConnection(targetPoolId)) {
+
+                configurePostgresSchema(transferSourceConn, sourceConfig, sourceSchema, false);
+                configurePostgresSchema(transferTargetConn, targetConfig, targetSchema, true);
 
                 if (attempt > 1) {
                     publish("  -> Retry bảng " + table.getTableName() + " lần " + attempt + "/" + attempts + "...");
@@ -720,6 +918,34 @@ public class MigrationWorker extends SwingWorker<Void, String> {
             return normalized.substring(0, normalized.length() - 1);
         }
         return normalized;
+    }
+
+    private void configurePostgresSchema(
+            Connection conn,
+            DatabaseConfig config,
+            String schema,
+            boolean createIfMissing
+    ) throws SQLException {
+        if (conn == null || config == null || config.getType() != DatabaseType.POSTGRESQL) {
+            return;
+        }
+
+        String effectiveSchema = schema == null ? "" : schema.trim();
+        if (effectiveSchema.isBlank()) {
+            return;
+        }
+
+        String quotedSchema = quotePostgresIdentifier(effectiveSchema);
+        try (Statement statement = conn.createStatement()) {
+            if (createIfMissing) {
+                statement.execute("CREATE SCHEMA IF NOT EXISTS " + quotedSchema);
+            }
+            statement.execute("SET search_path TO " + quotedSchema + ", public");
+        }
+    }
+
+    private static String quotePostgresIdentifier(String identifier) {
+        return "\"" + identifier.replace("\"", "\"\"") + "\"";
     }
 
     private static String normalizeRoutineSqlForJdbc(String sql, SqlDialect targetDialect) {
@@ -959,6 +1185,10 @@ public class MigrationWorker extends SwingWorker<Void, String> {
             DatabaseType sourceDbType,
             SqlDialect targetDialect
     ) throws SQLException {
+        if (targetDialect == null) {
+            throw new IllegalArgumentException("Target dialect khong hop le");
+        }
+
         if (functions.isEmpty()) {
             publish("  -> Khong co function/procedure nao de tao.");
             return;
@@ -1015,6 +1245,10 @@ public class MigrationWorker extends SwingWorker<Void, String> {
             DatabaseType sourceDbType,
             SqlDialect targetDialect
     ) throws SQLException {
+        if (targetDialect == null) {
+            throw new IllegalArgumentException("Target dialect khong hop le");
+        }
+
         if (triggers.isEmpty()) {
             publish("  -> Khong co trigger nao de tao.");
             return;
@@ -1139,6 +1373,10 @@ public class MigrationWorker extends SwingWorker<Void, String> {
             SqlDialect targetDialect,
             boolean replaceExistingViews
     ) throws SQLException {
+        if (targetDialect == null) {
+            throw new IllegalArgumentException("Target dialect khong hop le");
+        }
+
         if (views == null || views.isEmpty()) {
             publish("  -> Khong co view nao de tao.");
             return;
@@ -1170,7 +1408,6 @@ public class MigrationWorker extends SwingWorker<Void, String> {
                             vd.getSelectClause(),
                             sourceSchema,
                             targetSchema,
-                            sourceDbType,
                             transformer
                     );
 
@@ -1237,7 +1474,6 @@ public class MigrationWorker extends SwingWorker<Void, String> {
             String clause,
             String sourceSchema,
             String targetSchema,
-            DatabaseType sourceDbType,
             OracleToPgsqlTransformer transformer
     ) {
         if (clause == null) return clause;
@@ -1288,10 +1524,10 @@ public class MigrationWorker extends SwingWorker<Void, String> {
         List<ViewDefinition> filtered = new ArrayList<>();
         for (ViewDefinition vd : allViews) {
             String normalized = vd.getViewName().toUpperCase(Locale.ROOT);
-            if (!includeViews.isEmpty() && !includeViews.contains(normalized)) {
+            if (!includeViews.isEmpty() && !matchesAnyWildcardPattern(normalized, includeViews)) {
                 continue;
             }
-            if (excludeViews.contains(normalized)) {
+            if (matchesAnyWildcardPattern(normalized, excludeViews)) {
                 continue;
             }
             filtered.add(vd);

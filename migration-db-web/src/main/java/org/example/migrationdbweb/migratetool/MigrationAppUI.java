@@ -12,12 +12,14 @@ import java.awt.GridBagConstraints;
 import java.awt.GridBagLayout;
 import java.awt.GridLayout;
 import java.awt.Insets;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Set;
 
-import javax.swing.Box;
 import javax.swing.BorderFactory;
+import javax.swing.Box;
 import javax.swing.ButtonGroup;
 import javax.swing.JButton;
 import javax.swing.JCheckBox;
@@ -56,6 +58,7 @@ public class MigrationAppUI extends JFrame {
     private JRadioButton optCopyAll, optStructureOnly, optDataOnly;
     private JCheckBox chkTruncateTarget, chkCopyNewOnly;
     private JTextField limitDataField, batchSizeField;
+    private JTextField dataThreadsField;
     private JTextField includeTablesField, excludeTablesField;
 
     // --- UI Fields: Advanced objects ---
@@ -77,6 +80,12 @@ public class MigrationAppUI extends JFrame {
     private JButton btnStartMigration;
     private JTextArea logArea;
     private JProgressBar progressBar;
+
+    // --- Saved credentials (JSON local file) ---
+    private JComboBox<String> sourceCredentialCombo;
+    private JComboBox<String> targetCredentialCombo;
+    private final SavedCredentialJsonStore credentialStore = new SavedCredentialJsonStore();
+    private final Map<String, SavedCredentialJsonStore.SavedDbCredential> credentialByName = new LinkedHashMap<>();
 
     public MigrationAppUI() {
         setTitle("Database Migration Tool");
@@ -102,6 +111,8 @@ public class MigrationAppUI extends JFrame {
         // SOUTH: Progress + Logs + Action button
         JPanel bottomPanel = createBottomPanel();
         add(bottomPanel, BorderLayout.SOUTH);
+
+        refreshSavedCredentialsCombos();
     }
 
     /**
@@ -165,6 +176,24 @@ public class MigrationAppUI extends JFrame {
         JButton btnTest = new JButton("Test Connection");
         btnTest.addActionListener(e -> testConnectionAction(isSource));
         JPanel btnPanel = new JPanel(new FlowLayout(FlowLayout.RIGHT));
+        JComboBox<String> credentialCombo = new JComboBox<>();
+        credentialCombo.setPrototypeDisplayValue("credential-name-xxxxxxxxxxxx");
+        JButton btnLoadCredential = new JButton("Load Credential");
+        JButton btnSaveCredential = new JButton("Save Credential");
+
+        if (isSource) {
+            sourceCredentialCombo = credentialCombo;
+        } else {
+            targetCredentialCombo = credentialCombo;
+        }
+
+        btnLoadCredential.addActionListener(e -> loadCredentialAction(isSource));
+        btnSaveCredential.addActionListener(e -> saveCredentialAction(isSource));
+
+        btnPanel.add(new JLabel("Credential:"));
+        btnPanel.add(credentialCombo);
+        btnPanel.add(btnLoadCredential);
+        btnPanel.add(btnSaveCredential);
         btnPanel.add(btnTest);
         panel.add(btnPanel, BorderLayout.SOUTH);
 
@@ -216,20 +245,25 @@ public class MigrationAppUI extends JFrame {
         limitDataField = new JTextField("0", 7);
         limitDataField.setToolTipText("Nhap 0 de copy toan bo dong.");
         row2.add(limitDataField);
+        row2.add(Box.createHorizontalStrut(20));
+        row2.add(new JLabel("Data threads (0 = auto):"));
+        dataThreadsField = new JTextField("0", 5);
+        dataThreadsField.setToolTipText("So luong thread cho phase migrate data. 0 = tu dong theo pool/table.");
+        row2.add(dataThreadsField);
         gbc.gridx = 0; gbc.gridy = row++; gbc.gridwidth = 2; panel.add(row2, gbc); gbc.gridwidth = 1;
 
         // Include / Exclude tables
         JPanel includePanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 0, 2));
         includePanel.add(new JLabel("Include bang (CSV):"));
         includeTablesField = new JTextField("", 28);
-        includeTablesField.setToolTipText("Vi du: users,orders,order_items. Bo trong = migrate tat ca.");
+        includeTablesField.setToolTipText("Ho tro wildcard * (vi du: user*,order_*). Bo trong = migrate tat ca.");
         includePanel.add(includeTablesField);
         gbc.gridx = 0; gbc.gridy = row++; gbc.gridwidth = 2; panel.add(includePanel, gbc); gbc.gridwidth = 1;
 
         JPanel excludePanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 0, 2));
         excludePanel.add(new JLabel("Exclude bang  (CSV):"));
         excludeTablesField = new JTextField("", 28);
-        excludeTablesField.setToolTipText("Vi du: audit_log,temp_table");
+        excludeTablesField.setToolTipText("Ho tro wildcard * (vi du: temp_*,audit*).");
         excludePanel.add(excludeTablesField);
         gbc.gridx = 0; gbc.gridy = row++; gbc.gridwidth = 2; panel.add(excludePanel, gbc); gbc.gridwidth = 1;
 
@@ -258,14 +292,14 @@ public class MigrationAppUI extends JFrame {
         JPanel includeViewsPanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 0, 2));
         includeViewsPanel.add(new JLabel("  Include views (CSV):"));
         includeViewsField = new JTextField("", 28);
-        includeViewsField.setToolTipText("Vi du: v_emp_details,v_orders_sum");
+        includeViewsField.setToolTipText("Ho tro wildcard * (vi du: v_user*,v_order_*).");
         includeViewsPanel.add(includeViewsField);
         gbc.gridx = 0; gbc.gridy = row++; gbc.gridwidth = 2; panel.add(includeViewsPanel, gbc); gbc.gridwidth = 1;
 
         JPanel excludeViewsPanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 0, 2));
         excludeViewsPanel.add(new JLabel("  Exclude views  (CSV):"));
         excludeViewsField = new JTextField("", 28);
-        excludeViewsField.setToolTipText("Vi du: v_temp");
+        excludeViewsField.setToolTipText("Ho tro wildcard * (vi du: v_temp*).");
         excludeViewsPanel.add(excludeViewsField);
         gbc.gridx = 0; gbc.gridy = row++; gbc.gridwidth = 2; panel.add(excludeViewsPanel, gbc); gbc.gridwidth = 1;
 
@@ -376,6 +410,8 @@ public class MigrationAppUI extends JFrame {
         Integer limitRows = parseIntField(limitDataField, 0, "Limit");
         int batchSize = parseIntField(batchSizeField, 1000, "Batch size");
         batchSize = Math.max(1, batchSize);
+        int dataThreads = parseIntField(dataThreadsField, 0, "Data threads");
+        dataThreads = Math.max(0, dataThreads);
 
         Set<String> includeTables = parseCsvTableSet(includeTablesField.getText());
         Set<String> excludeTables = parseCsvTableSet(excludeTablesField.getText());
@@ -385,6 +421,8 @@ public class MigrationAppUI extends JFrame {
         // Schema: dùng override nếu có, không thì dùng default
         String sourceSchema = parseSchema(sourceSchemaField, sourceConfig);
         String targetSchema = parseSchema(targetSchemaField, targetConfig);
+        sourceConfig.setSchemaName(sourceSchema);
+        targetConfig.setSchemaName(targetSchema);
 
         // ── 3. Parse Retry policy ───────────────────────────────────────
         boolean retryEnabled = chkRetryEnabled.isSelected();
@@ -441,6 +479,7 @@ public class MigrationAppUI extends JFrame {
         appendLog("Schema source=" + sourceSchema + " | target=" + targetSchema);
         appendLog("Mode: " + (isStructureOnly ? "STRUCTURE_ONLY" : isDataOnly ? "DATA_ONLY" : "ALL"));
         appendLog("Batch size: " + batchSize + " | Limit: " + (limitRows == null ? "ALL" : limitRows));
+        appendLog("Data threads: " + (dataThreads == 0 ? "AUTO" : dataThreads));
         appendLog("Truncate: " + truncateTarget + " | CopyNewOnly: " + copyNewOnly);
         appendLog("Retry: enabled=" + retryEnabled + " attempts=" + retryMaxAttempts
                 + " delay=" + retryDelayMs + "ms backoff=" + retryBackoff);
@@ -460,6 +499,7 @@ public class MigrationAppUI extends JFrame {
                 sourceSchema,
                 targetSchema,
                 batchSize,
+                dataThreads,
                 truncateTarget,
                 copyNewOnly,
                 limitRows,
@@ -498,8 +538,15 @@ public class MigrationAppUI extends JFrame {
         String dbName = requireText(isSource ? sourceDbNameField : targetDbNameField, "DB Name / SID");
         String username = requireText(isSource ? sourceUserField : targetUserField, "Username");
         String password = new String(isSource ? sourcePassField.getPassword() : targetPassField.getPassword());
-
-        return new DatabaseConfig(dbType, host, port, dbName, username, password);
+        DatabaseConfig config = new DatabaseConfig(dbType, host, port, dbName, username, password);
+        JTextField schemaField = isSource ? sourceSchemaField : targetSchemaField;
+        if (schemaField != null) {
+            String rawSchema = schemaField.getText();
+            if (rawSchema != null && !rawSchema.trim().isEmpty()) {
+                config.setSchemaName(rawSchema.trim());
+            }
+        }
+        return config;
     }
 
     /** Schema: dùng field override nếu filled, không thì default logic. */
@@ -577,6 +624,133 @@ public class MigrationAppUI extends JFrame {
             if (!v.isEmpty()) set.add(v.toUpperCase(Locale.ROOT));
         }
         return set;
+    }
+
+    private void saveCredentialAction(boolean isSource) {
+        try {
+            DatabaseConfig config = buildDatabaseConfig(isSource);
+            String schema = parseSchema(isSource ? sourceSchemaField : targetSchemaField, config);
+            config.setSchemaName(schema);
+
+            String defaultName = buildSuggestedCredentialName(isSource, config);
+            String credentialName = JOptionPane.showInputDialog(
+                    this,
+                    "Nhap ten credential:",
+                    defaultName
+            );
+
+            if (credentialName == null) {
+                return;
+            }
+
+            String trimmed = credentialName.trim();
+            if (trimmed.isEmpty()) {
+                JOptionPane.showMessageDialog(this, "Ten credential khong duoc de trong.", "Loi", JOptionPane.ERROR_MESSAGE);
+                return;
+            }
+
+            credentialStore.saveOrUpdate(trimmed, config);
+            refreshSavedCredentialsCombos();
+            appendLog("[OK] Da luu credential '" + trimmed + "' vao file JSON.");
+        } catch (RuntimeException e) {
+            JOptionPane.showMessageDialog(this, e.getMessage(), "Loi luu credential", JOptionPane.ERROR_MESSAGE);
+            appendLog("[LOI] Luu credential that bai: " + e.getMessage());
+        }
+    }
+
+    private void loadCredentialAction(boolean isSource) {
+        JComboBox<String> combo = isSource ? sourceCredentialCombo : targetCredentialCombo;
+        if (combo == null) {
+            return;
+        }
+
+        Object selected = combo.getSelectedItem();
+        if (selected == null) {
+            JOptionPane.showMessageDialog(this, "Hay chon credential de nap.", "Thong bao", JOptionPane.INFORMATION_MESSAGE);
+            return;
+        }
+
+        String name = String.valueOf(selected);
+        SavedCredentialJsonStore.SavedDbCredential credential = credentialByName.get(name);
+        if (credential == null) {
+            JOptionPane.showMessageDialog(this, "Khong tim thay credential da chon.", "Loi", JOptionPane.ERROR_MESSAGE);
+            return;
+        }
+
+        applyCredentialToForm(isSource, credential.config());
+        appendLog("[OK] Da nap credential '" + name + "' cho " + (isSource ? "SOURCE" : "TARGET") + ".");
+    }
+
+    private void refreshSavedCredentialsCombos() {
+        try {
+            java.util.List<SavedCredentialJsonStore.SavedDbCredential> allCredentials = credentialStore.loadAll();
+            credentialByName.clear();
+            for (SavedCredentialJsonStore.SavedDbCredential credential : allCredentials) {
+                credentialByName.put(credential.name(), credential);
+            }
+
+            String[] names = credentialByName.keySet().toArray(String[]::new);
+            if (sourceCredentialCombo != null) {
+                sourceCredentialCombo.removeAllItems();
+                for (String name : names) {
+                    sourceCredentialCombo.addItem(name);
+                }
+            }
+            if (targetCredentialCombo != null) {
+                targetCredentialCombo.removeAllItems();
+                for (String name : names) {
+                    targetCredentialCombo.addItem(name);
+                }
+            }
+        } catch (RuntimeException e) {
+            appendLog("[WARN] Khong tai duoc danh sach credential: " + e.getMessage());
+        }
+    }
+
+    private void applyCredentialToForm(boolean isSource, DatabaseConfig config) {
+        if (config == null) {
+            return;
+        }
+
+        JComboBox<String> typeCombo = isSource ? sourceDbTypeCombo : targetDbTypeCombo;
+        JTextField hostField = isSource ? sourceHostField : targetHostField;
+        JTextField portField = isSource ? sourcePortField : targetPortField;
+        JTextField dbNameField = isSource ? sourceDbNameField : targetDbNameField;
+        JTextField userField = isSource ? sourceUserField : targetUserField;
+        JPasswordField passField = isSource ? sourcePassField : targetPassField;
+        JTextField schemaField = isSource ? sourceSchemaField : targetSchemaField;
+
+        if (typeCombo != null) {
+            typeCombo.setSelectedItem(config.getType() == DatabaseType.ORACLE ? "Oracle" : "PostgreSQL");
+        }
+        if (hostField != null) {
+            hostField.setText(config.getHost());
+        }
+        if (portField != null) {
+            portField.setText(String.valueOf(config.getPort()));
+        }
+        if (dbNameField != null) {
+            dbNameField.setText(config.getDatabaseName());
+        }
+        if (userField != null) {
+            userField.setText(config.getUsername());
+        }
+        if (passField != null) {
+            passField.setText(config.getPassword() == null ? "" : config.getPassword());
+        }
+        if (schemaField != null) {
+            schemaField.setText(config.getSchemaName() == null ? "" : config.getSchemaName());
+        }
+    }
+
+    private String buildSuggestedCredentialName(boolean isSource, DatabaseConfig config) {
+        String role = isSource ? "source" : "target";
+        String type = config.getType() == null ? "db" : config.getType().name().toLowerCase(Locale.ROOT);
+        String host = config.getHost() == null || config.getHost().isBlank() ? "host" : config.getHost().trim();
+        String db = config.getDatabaseName() == null || config.getDatabaseName().isBlank()
+                ? "database"
+                : config.getDatabaseName().trim();
+        return role + "-" + type + "-" + host + "-" + db;
     }
 
     /** Test connection button handler. */
