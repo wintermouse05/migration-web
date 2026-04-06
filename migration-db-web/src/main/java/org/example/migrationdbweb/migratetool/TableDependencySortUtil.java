@@ -100,6 +100,87 @@ public final class TableDependencySortUtil {
         return sorted;
     }
 
+    /**
+     * Compute FK dependency levels for tables.
+     *
+     * Level definition:
+     * - Tables with no parent dependency are level 0.
+     * - Child level = max(parent level + 1).
+     *
+     * Cyclic leftovers (if any) are assigned default level 0.
+     */
+    public static Map<TableDefinition, Integer> computeForeignKeyLevels(List<TableDefinition> tables) {
+        Map<TableDefinition, Integer> result = new LinkedHashMap<>();
+        if (tables == null || tables.isEmpty()) {
+            return result;
+        }
+
+        Map<String, TableDefinition> byName = new LinkedHashMap<>();
+        Map<String, String> canonicalToActualKey = new HashMap<>();
+        for (TableDefinition table : tables) {
+            String normalizedTableName = normalize(table.getTableName());
+            byName.put(normalizedTableName, table);
+            canonicalToActualKey.putIfAbsent(toCanonicalKey(normalizedTableName), normalizedTableName);
+        }
+
+        Map<String, Set<String>> childrenByParent = new LinkedHashMap<>();
+        Map<String, Integer> inDegree = new HashMap<>();
+        for (String tableKey : byName.keySet()) {
+            childrenByParent.put(tableKey, new LinkedHashSet<>());
+            inDegree.put(tableKey, 0);
+        }
+
+        for (TableDefinition table : tables) {
+            String childKey = normalize(table.getTableName());
+            for (ForeignKeyDefinition fk : table.getForeignKeys()) {
+                String parentKey = resolveParentKey(fk.getTargetTableName(), byName, canonicalToActualKey);
+                if (parentKey.isEmpty() || parentKey.equals(childKey) || !byName.containsKey(parentKey)) {
+                    continue;
+                }
+
+                Set<String> children = childrenByParent.computeIfAbsent(parentKey, ignored -> new LinkedHashSet<>());
+                if (children.add(childKey)) {
+                    inDegree.put(childKey, inDegree.getOrDefault(childKey, 0) + 1);
+                }
+            }
+        }
+
+        Queue<String> queue = new ArrayDeque<>();
+        for (TableDefinition table : tables) {
+            String key = normalize(table.getTableName());
+            if (inDegree.getOrDefault(key, 0) == 0) {
+                queue.offer(key);
+            }
+        }
+
+        Map<String, Integer> levelByKey = new HashMap<>();
+        while (!queue.isEmpty()) {
+            String current = queue.poll();
+            int currentLevel = levelByKey.getOrDefault(current, 0);
+
+            for (String child : childrenByParent.getOrDefault(current, Set.of())) {
+                int nextLevel = currentLevel + 1;
+                int existing = levelByKey.getOrDefault(child, 0);
+                if (nextLevel > existing) {
+                    levelByKey.put(child, nextLevel);
+                }
+
+                int nextInDegree = inDegree.getOrDefault(child, 0) - 1;
+                inDegree.put(child, nextInDegree);
+                if (nextInDegree == 0) {
+                    queue.offer(child);
+                }
+            }
+        }
+
+        for (TableDefinition table : tables) {
+            String key = normalize(table.getTableName());
+            result.put(table, levelByKey.getOrDefault(key, 0));
+        }
+
+        return result;
+    }
+
     private static String normalize(String tableName) {
         if (tableName == null) {
             return "";

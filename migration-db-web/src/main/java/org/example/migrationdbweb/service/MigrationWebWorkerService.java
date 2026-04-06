@@ -979,7 +979,9 @@ public class MigrationWebWorkerService {
         }
 
         broadcastStatus(60, "RUNNING",
-                "Da thong ke so dong cho " + plans.size() + " bang. Se migrate theo thu tu tang dan du lieu.", true);
+            "Da thong ke so dong cho " + plans.size()
+                + " bang. Se migrate theo FK-level truoc, sau do tang dan du lieu trong tung level.",
+            true);
 
         int threadCount = resolveDataMigrationThreadCount(plans.size(), sourceConfig, targetConfig);
         broadcastStatus(60, "RUNNING",
@@ -1151,14 +1153,18 @@ public class MigrationWebWorkerService {
             SqlDialect sourceDialect
     ) {
         List<TableMigrationPlan> plans = new ArrayList<>();
+        Map<TableDefinition, Integer> fkLevels = org.example.migrationdbweb.migratetool.TableDependencySortUtil
+            .computeForeignKeyLevels(tables);
         for (int i = 0; i < tables.size(); i++) {
             TableDefinition table = tables.get(i);
             long rowCount = countRowsForTable(sourceConn, table, sourceDialect);
-            plans.add(new TableMigrationPlan(table, rowCount, i));
+            int fkLevel = fkLevels.getOrDefault(table, 0);
+            plans.add(new TableMigrationPlan(table, rowCount, i, fkLevel));
         }
 
         plans.sort(
-                Comparator.comparingLong(TableMigrationPlan::rowCount)
+                Comparator.comparingInt(TableMigrationPlan::fkLevel)
+                        .thenComparingLong(TableMigrationPlan::rowCount)
                         .thenComparingInt(TableMigrationPlan::originalOrder)
         );
         return plans;
@@ -1187,7 +1193,7 @@ public class MigrationWebWorkerService {
         return Math.max(1, Math.min(suggested, maxByPool));
     }
 
-    private record TableMigrationPlan(TableDefinition table, long rowCount, int originalOrder) {}
+    private record TableMigrationPlan(TableDefinition table, long rowCount, int originalOrder, int fkLevel) {}
 
     private record TableTransferOutcome(
             String tableName,

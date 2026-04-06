@@ -126,4 +126,14 @@ class SameTypeMigrationDialectTests {
         assertTrue(remapped.contains("'SCOTT.ORDERS literal'"));
         assertTrue(remapped.contains("-- keep SCOTT.ORDERS in comment"));
     }
+
+    @Test
+    void shouldPreserveTargetSchemaCaseWhenRemappingQuotedSchema() {
+        String ddl = "SELECT * FROM \"public\".\"orders\"";
+
+        String remapped = OracleDialect.remapSchemaPrefixSafely(ddl, "public", "archive");
+
+        assertTrue(remapped.contains("\"archive\".\"orders\""));
+        assertFalse(remapped.contains("\"ARCHIVE\""));
+    }
 }

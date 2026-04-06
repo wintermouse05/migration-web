@@ -575,7 +575,8 @@ public class OracleDialect implements SqlDialect {
             pos++;
         }
 
-        return new Match(pos, "\"" + targetSchema.toUpperCase(Locale.ROOT) + "\".");
+        String safeTarget = targetSchema.replace("\"", "\"\"");
+        return new Match(pos, "\"" + safeTarget + "\".");
     }
 
     private static int findClosingQuote(String text, int start) {

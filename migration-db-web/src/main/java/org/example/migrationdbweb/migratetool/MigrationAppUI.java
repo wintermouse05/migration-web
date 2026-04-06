@@ -8,10 +8,7 @@ import java.awt.Color;
 import java.awt.Dimension;
 import java.awt.FlowLayout;
 import java.awt.Font;
-import java.awt.GridBagConstraints;
-import java.awt.GridBagLayout;
 import java.awt.GridLayout;
-import java.awt.Insets;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.Locale;
@@ -112,7 +109,67 @@ public class MigrationAppUI extends JFrame {
         JPanel bottomPanel = createBottomPanel();
         add(bottomPanel, BorderLayout.SOUTH);
 
+        bindOptionStateListeners();
+        updateModeDependentOptionsState();
+
         refreshSavedCredentialsCombos();
+    }
+
+    private void bindOptionStateListeners() {
+        if (optCopyAll != null) {
+            optCopyAll.addActionListener(e -> updateModeDependentOptionsState());
+        }
+        if (optStructureOnly != null) {
+            optStructureOnly.addActionListener(e -> updateModeDependentOptionsState());
+        }
+        if (optDataOnly != null) {
+            optDataOnly.addActionListener(e -> updateModeDependentOptionsState());
+        }
+        if (chkMigrateViews != null) {
+            chkMigrateViews.addActionListener(e -> updateModeDependentOptionsState());
+        }
+    }
+
+    private void updateModeDependentOptionsState() {
+        boolean structureOnly = optStructureOnly != null && optStructureOnly.isSelected();
+        boolean dataOnly = optDataOnly != null && optDataOnly.isSelected();
+
+        if (chkTruncateTarget != null) {
+            chkTruncateTarget.setEnabled(!structureOnly);
+        }
+        if (chkCopyNewOnly != null) {
+            chkCopyNewOnly.setEnabled(!structureOnly);
+        }
+
+        boolean allowDdlOptions = !dataOnly;
+        if (chkMigrateSequences != null) {
+            chkMigrateSequences.setEnabled(allowDdlOptions);
+        }
+        if (chkMigrateIndexes != null) {
+            chkMigrateIndexes.setEnabled(allowDdlOptions);
+        }
+        if (chkMigrateFunctions != null) {
+            chkMigrateFunctions.setEnabled(allowDdlOptions);
+        }
+        if (chkMigrateTriggers != null) {
+            chkMigrateTriggers.setEnabled(allowDdlOptions);
+        }
+        if (chkMigrateViews != null) {
+            chkMigrateViews.setEnabled(allowDdlOptions);
+        }
+
+        boolean allowViewDetails = allowDdlOptions
+                && chkMigrateViews != null
+                && chkMigrateViews.isSelected();
+        if (chkReplaceExistingViews != null) {
+            chkReplaceExistingViews.setEnabled(allowViewDetails);
+        }
+        if (includeViewsField != null) {
+            includeViewsField.setEnabled(allowViewDetails);
+        }
+        if (excludeViewsField != null) {
+            excludeViewsField.setEnabled(allowViewDetails);
+        }
     }
 
     /**
@@ -204,37 +261,57 @@ public class MigrationAppUI extends JFrame {
      * Tạo panel tùy chọn migration — chia thành các section rõ ràng.
      */
     private JPanel createOptionsPanel() {
-        JPanel panel = new JPanel(new GridBagLayout());
-        panel.setBorder(BorderFactory.createEmptyBorder(10, 10, 10, 10));
-        GridBagConstraints gbc = new GridBagConstraints();
-        gbc.anchor = GridBagConstraints.WEST;
-        gbc.insets = new Insets(4, 8, 4, 8);
-        gbc.fill = GridBagConstraints.HORIZONTAL;
-        gbc.weightx = 1.0;
+        JPanel wrapper = new JPanel(new BorderLayout(10, 8));
+        wrapper.setBorder(BorderFactory.createEmptyBorder(10, 10, 10, 10));
 
-        int row = 0;
+        JPanel grid = new JPanel(new GridLayout(3, 2, 10, 10));
+        grid.add(createSection1ModePanel());
+        grid.add(createSection2CoreOptionsPanel());
+        grid.add(createSection3AdvancedPanel());
+        grid.add(createSection4ViewsPanel());
+        grid.add(createSection5RetryPanel());
+        grid.add(createSection6ResumePanel());
+        wrapper.add(grid, BorderLayout.CENTER);
 
-        // ── SECTION: Migration Mode ──────────────────────────────────────
-        addSectionHeader(panel, gbc, row++, "1. CHE DO MIGRATION");
+        JPanel notePanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 0, 2));
+        JLabel note = new JLabel("Neu tien trinh bi treo hon 5 phut ma khong co log moi, vui long kiem tra ket noi DB.");
+        note.setFont(new Font("Arial", Font.ITALIC, 11));
+        note.setForeground(new Color(120, 100, 80));
+        notePanel.add(note);
+        wrapper.add(notePanel, BorderLayout.SOUTH);
+
+        return wrapper;
+    }
+
+    private JPanel createSection1ModePanel() {
+        JPanel section = createOptionSection("1. CHE DO MIGRATION");
+        JPanel content = new JPanel(new GridLayout(3, 1, 4, 4));
+
         optCopyAll = new JRadioButton("Copy cau truc va du lieu", true);
         optStructureOnly = new JRadioButton("Chi copy cau truc (DDL)");
         optDataOnly = new JRadioButton("Chi copy du lieu (DML)");
-        ButtonGroup modeGroup = new ButtonGroup();
-        modeGroup.add(optCopyAll); modeGroup.add(optStructureOnly); modeGroup.add(optDataOnly);
-        gbc.gridwidth = 2;
-        gbc.gridx = 0; gbc.gridy = row++; panel.add(optCopyAll, gbc);
-        gbc.gridx = 0; gbc.gridy = row++; panel.add(optStructureOnly, gbc);
-        gbc.gridx = 0; gbc.gridy = row++; panel.add(optDataOnly, gbc);
-        gbc.gridwidth = 1;
 
-        // ── SECTION: Core options ─────────────────────────────────────────
-        addSectionHeader(panel, gbc, row++, "2. TUY CHON CO BAN");
+        ButtonGroup modeGroup = new ButtonGroup();
+        modeGroup.add(optCopyAll);
+        modeGroup.add(optStructureOnly);
+        modeGroup.add(optDataOnly);
+
+        content.add(optCopyAll);
+        content.add(optStructureOnly);
+        content.add(optDataOnly);
+        section.add(content, BorderLayout.CENTER);
+        return section;
+    }
+
+    private JPanel createSection2CoreOptionsPanel() {
+        JPanel section = createOptionSection("2. TUY CHON CO BAN");
+        JPanel content = new JPanel(new GridLayout(5, 1, 4, 4));
+
         chkTruncateTarget = new JCheckBox("Xoa du lieu cu target truoc khi migrate (TRUNCATE)");
         chkCopyNewOnly = new JCheckBox("Chi copy ban ghi moi (theo PK — bo qua trung lap)");
-        gbc.gridx = 0; gbc.gridy = row++; gbc.gridwidth = 2; panel.add(chkTruncateTarget, gbc); gbc.gridwidth = 1;
-        gbc.gridx = 0; gbc.gridy = row++; gbc.gridwidth = 2; panel.add(chkCopyNewOnly, gbc); gbc.gridwidth = 1;
+        content.add(chkTruncateTarget);
+        content.add(chkCopyNewOnly);
 
-        // Batch size + Limit
         JPanel row2 = new JPanel(new FlowLayout(FlowLayout.LEFT, 5, 0));
         row2.add(new JLabel("Batch size (rows/batch):"));
         batchSizeField = new JTextField("1000", 7);
@@ -250,62 +327,82 @@ public class MigrationAppUI extends JFrame {
         dataThreadsField = new JTextField("0", 5);
         dataThreadsField.setToolTipText("So luong thread cho phase migrate data. 0 = tu dong theo pool/table.");
         row2.add(dataThreadsField);
-        gbc.gridx = 0; gbc.gridy = row++; gbc.gridwidth = 2; panel.add(row2, gbc); gbc.gridwidth = 1;
+        content.add(row2);
 
-        // Include / Exclude tables
         JPanel includePanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 0, 2));
         includePanel.add(new JLabel("Include bang (CSV):"));
         includeTablesField = new JTextField("", 28);
         includeTablesField.setToolTipText("Ho tro wildcard * (vi du: user*,order_*). Bo trong = migrate tat ca.");
         includePanel.add(includeTablesField);
-        gbc.gridx = 0; gbc.gridy = row++; gbc.gridwidth = 2; panel.add(includePanel, gbc); gbc.gridwidth = 1;
+        content.add(includePanel);
 
         JPanel excludePanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 0, 2));
         excludePanel.add(new JLabel("Exclude bang  (CSV):"));
         excludeTablesField = new JTextField("", 28);
         excludeTablesField.setToolTipText("Ho tro wildcard * (vi du: temp_*,audit*).");
         excludePanel.add(excludeTablesField);
-        gbc.gridx = 0; gbc.gridy = row++; gbc.gridwidth = 2; panel.add(excludePanel, gbc); gbc.gridwidth = 1;
+        content.add(excludePanel);
 
-        // ── SECTION: Advanced objects ──────────────────────────────────────
-        addSectionHeader(panel, gbc, row++, "3. DOI TUONG NANG CAO");
+        section.add(content, BorderLayout.CENTER);
+        return section;
+    }
+
+    private JPanel createSection3AdvancedPanel() {
+        JPanel section = createOptionSection("3. DOI TUONG NANG CAO");
+        JPanel content = new JPanel(new GridLayout(2, 1, 4, 4));
+
         chkMigrateSequences = new JCheckBox("Sequences");
         chkMigrateIndexes   = new JCheckBox("Indexes");
         chkMigrateFunctions = new JCheckBox("Functions/Procedures");
         chkMigrateTriggers = new JCheckBox("Triggers");
 
         JPanel advRow1 = new JPanel(new FlowLayout(FlowLayout.LEFT, 5, 0));
-        advRow1.add(chkMigrateSequences); advRow1.add(chkMigrateIndexes);
-        gbc.gridx = 0; gbc.gridy = row++; gbc.gridwidth = 2; panel.add(advRow1, gbc); gbc.gridwidth = 1;
+        advRow1.add(chkMigrateSequences);
+        advRow1.add(chkMigrateIndexes);
+        content.add(advRow1);
 
         JPanel advRow2 = new JPanel(new FlowLayout(FlowLayout.LEFT, 5, 0));
-        advRow2.add(chkMigrateFunctions); advRow2.add(chkMigrateTriggers);
-        gbc.gridx = 0; gbc.gridy = row++; gbc.gridwidth = 2; panel.add(advRow2, gbc); gbc.gridwidth = 1;
+        advRow2.add(chkMigrateFunctions);
+        advRow2.add(chkMigrateTriggers);
+        content.add(advRow2);
 
-        // ── SECTION: Views ────────────────────────────────────────────────
-        addSectionHeader(panel, gbc, row++, "4. VIEWS");
+        section.add(content, BorderLayout.CENTER);
+        return section;
+    }
+
+    private JPanel createSection4ViewsPanel() {
+        JPanel section = createOptionSection("4. VIEWS");
+        JPanel content = new JPanel(new GridLayout(4, 1, 4, 4));
+
         chkMigrateViews = new JCheckBox("Migrate views");
         chkReplaceExistingViews = new JCheckBox("Thay the views da ton tai (DROP + CREATE)");
-        gbc.gridx = 0; gbc.gridy = row++; gbc.gridwidth = 2; panel.add(chkMigrateViews, gbc); gbc.gridwidth = 1;
-        gbc.gridx = 0; gbc.gridy = row++; gbc.gridwidth = 2; panel.add(chkReplaceExistingViews, gbc); gbc.gridwidth = 1;
+        content.add(chkMigrateViews);
+        content.add(chkReplaceExistingViews);
 
         JPanel includeViewsPanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 0, 2));
         includeViewsPanel.add(new JLabel("  Include views (CSV):"));
         includeViewsField = new JTextField("", 28);
         includeViewsField.setToolTipText("Ho tro wildcard * (vi du: v_user*,v_order_*).");
         includeViewsPanel.add(includeViewsField);
-        gbc.gridx = 0; gbc.gridy = row++; gbc.gridwidth = 2; panel.add(includeViewsPanel, gbc); gbc.gridwidth = 1;
+        content.add(includeViewsPanel);
 
         JPanel excludeViewsPanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 0, 2));
         excludeViewsPanel.add(new JLabel("  Exclude views  (CSV):"));
         excludeViewsField = new JTextField("", 28);
         excludeViewsField.setToolTipText("Ho tro wildcard * (vi du: v_temp*).");
         excludeViewsPanel.add(excludeViewsField);
-        gbc.gridx = 0; gbc.gridy = row++; gbc.gridwidth = 2; panel.add(excludeViewsPanel, gbc); gbc.gridwidth = 1;
+        content.add(excludeViewsPanel);
 
-        // ── SECTION: Retry ────────────────────────────────────────────────
-        addSectionHeader(panel, gbc, row++, "5. RETRY / TU DONG THU LAI");
+        section.add(content, BorderLayout.CENTER);
+        return section;
+    }
+
+    private JPanel createSection5RetryPanel() {
+        JPanel section = createOptionSection("5. RETRY / TU DONG THU LAI");
+        JPanel content = new JPanel(new GridLayout(2, 1, 4, 4));
+
         chkRetryEnabled = new JCheckBox("Bat dau tinh nang retry khi gap loi tam thoi");
+        content.add(chkRetryEnabled);
 
         JPanel retryRow1 = new JPanel(new FlowLayout(FlowLayout.LEFT, 5, 0));
         retryRow1.add(new JLabel("So lan retry toi da:"));
@@ -319,13 +416,18 @@ public class MigrationAppUI extends JFrame {
         retryRow1.add(new JLabel("Backoff multiplier:"));
         retryBackoffField = new JTextField("2.0", 5);
         retryRow1.add(retryBackoffField);
+        content.add(retryRow1);
 
-        gbc.gridx = 0; gbc.gridy = row++; gbc.gridwidth = 2; panel.add(chkRetryEnabled, gbc); gbc.gridwidth = 1;
-        gbc.gridx = 0; gbc.gridy = row++; gbc.gridwidth = 2; panel.add(retryRow1, gbc); gbc.gridwidth = 1;
+        section.add(content, BorderLayout.CENTER);
+        return section;
+    }
 
-        // ── SECTION: Resume ───────────────────────────────────────────────
-        addSectionHeader(panel, gbc, row++, "6. RESUME / TIEP TUC TU DIEM DA DUNG");
+    private JPanel createSection6ResumePanel() {
+        JPanel section = createOptionSection("6. RESUME / TIEP TUC TU DIEM DA DUNG");
+        JPanel content = new JPanel(new GridLayout(2, 1, 4, 4));
+
         chkResumeEnabled = new JCheckBox("Bat dau tinh nang resume (tiep tuc tu diem da dung)");
+        content.add(chkResumeEnabled);
 
         JPanel resumeRow1 = new JPanel(new FlowLayout(FlowLayout.LEFT, 5, 0));
         resumeRow1.add(new JLabel("File checkpoint:"));
@@ -335,44 +437,21 @@ public class MigrationAppUI extends JFrame {
         this.chkResumeReset = new JCheckBox("Reset checkpoint cu?");
         resumeRow1.add(Box.createHorizontalStrut(10));
         resumeRow1.add(this.chkResumeReset);
+        content.add(resumeRow1);
 
-        gbc.gridx = 0; gbc.gridy = row++; gbc.gridwidth = 2; panel.add(chkResumeEnabled, gbc); gbc.gridwidth = 1;
-        gbc.gridx = 0; gbc.gridy = row++; gbc.gridwidth = 2; panel.add(resumeRow1, gbc); gbc.gridwidth = 1;
-
-        // ── SECTION: Hang detection note ─────────────────────────────────
-        JPanel notePanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 0, 4));
-        JLabel note = new JLabel("Neu tien trinh bi treo hon 5 phut ma khong co log moi, vui long kiem tra ket noi DB.");
-        note.setFont(new Font("Arial", Font.ITALIC, 11));
-        note.setForeground(new Color(120, 100, 80));
-        notePanel.add(note);
-        gbc.gridx = 0; gbc.gridy = row++; gbc.gridwidth = 2; panel.add(notePanel, gbc); gbc.gridwidth = 1;
-
-        return panel;
+        section.add(content, BorderLayout.CENTER);
+        return section;
     }
 
-    /**
-     * Thêm một section header label vào panel.
-     */
-    private void addSectionHeader(JPanel panel, GridBagConstraints gbc, int row, String title) {
-        JLabel label = new JLabel(title);
-        label.setFont(new Font("Arial", Font.BOLD, 12));
-        label.setForeground(new Color(30, 80, 160));
-        gbc.gridx = 0; gbc.gridy = row;
-        gbc.gridwidth = 2;
-        panel.add(label, gbc);
-        gbc.gridwidth = 1;
-        // Add a separator line
-        JPanel sep = new JPanel();
-        sep.setPreferredSize(new Dimension(10, 2));
-        sep.setBackground(new Color(180, 200, 240));
-        gbc.gridx = 0; gbc.gridy = row;
-        gbc.gridwidth = 2;
-        gbc.fill = GridBagConstraints.HORIZONTAL;
-        gbc.ipady = 2;
-        panel.add(sep, gbc);
-        gbc.fill = GridBagConstraints.HORIZONTAL;
-        gbc.ipady = 0;
-        gbc.gridwidth = 1;
+    private JPanel createOptionSection(String title) {
+        JPanel section = new JPanel(new BorderLayout(5, 5));
+        section.setBorder(BorderFactory.createTitledBorder(
+                BorderFactory.createEtchedBorder(),
+                title,
+                TitledBorder.LEFT,
+                TitledBorder.TOP
+        ));
+        return section;
     }
 
     /** SwingUtilities.invokeLater wrapper */

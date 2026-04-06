@@ -1,0 +1,63 @@
+[INFO] Scanning for projects...
+[INFO] 
+[INFO] --------------------< org.example:migration-db-web >--------------------
+[INFO] Building migration-db-web 0.0.1-SNAPSHOT
+[INFO]   from pom.xml
+[INFO] --------------------------------[ jar ]---------------------------------
+[INFO] 
+[INFO] --- resources:3.3.1:resources (default-resources) @ migration-db-web ---
+[INFO] Copying 1 resource from src\main\resources to target\classes
+[INFO] Copying 0 resource from src\main\resources to target\classes
+[INFO] 
+[INFO] --- compiler:3.14.1:compile (default-compile) @ migration-db-web ---
+[INFO] Nothing to compile - all classes are up to date.
+[INFO] 
+[INFO] --- resources:3.3.1:testResources (default-testResources) @ migration-db-web ---
+[INFO] skip non existing resourceDirectory C:\Users\dongdd\Documents\Development\migration-web\migration-db-web\src\test\resources
+[INFO] 
+[INFO] --- compiler:3.14.1:testCompile (default-testCompile) @ migration-db-web ---
+[INFO] Nothing to compile - all classes are up to date.
+[INFO] 
+[INFO] --- surefire:3.5.5:test (default-test) @ migration-db-web ---
+[INFO] Using auto detected provider org.apache.maven.surefire.junitplatform.JUnitPlatformProvider
+[INFO] 
+[INFO] -------------------------------------------------------
+[INFO]  T E S T S
+[INFO] -------------------------------------------------------
+[INFO] Running org.example.migrationdbweb.migratetool.PostgresToOracleTransformerTests
+[INFO] Tests run: 5, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 0.116 s -- in org.example.migrationdbweb.migratetool.PostgresToOracleTransformerTests
+[INFO] Running org.example.migrationdbweb.migratetool.SameTypeMigrationDialectTests
+[INFO] Tests run: 7, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 0.061 s -- in org.example.migrationdbweb.migratetool.SameTypeMigrationDialectTests
+[INFO] Running org.example.migrationdbweb.MigrationDbWebApplicationTests
+09:02:17.075 [main] INFO org.springframework.test.context.support.AnnotationConfigContextLoaderUtils -- Could not detect default configuration classes for test class [org.example.migrationdbweb.MigrationDbWebApplicationTests]: MigrationDbWebApplicationTests does not declare any static, non-private, non-final, nested classes annotated with @Configuration.
+09:02:17.305 [main] INFO org.springframework.boot.test.context.SpringBootTestContextBootstrapper -- Found @SpringBootConfiguration org.example.migrationdbweb.MigrationDbWebApplication for test class org.example.migrationdbweb.MigrationDbWebApplicationTests
+09:02:17.499 [main] INFO org.springframework.test.context.support.AnnotationConfigContextLoaderUtils -- Could not detect default configuration classes for test class [org.example.migrationdbweb.MigrationDbWebApplicationTests]: MigrationDbWebApplicationTests does not declare any static, non-private, non-final, nested classes annotated with @Configuration.
+09:02:17.502 [main] INFO org.springframework.boot.test.context.SpringBootTestContextBootstrapper -- Found @SpringBootConfiguration org.example.migrationdbweb.MigrationDbWebApplication for test class org.example.migrationdbweb.MigrationDbWebApplicationTests
+
+  .   ____          _            __ _ _
+ /\\ / ___'_ __ _ _(_)_ __  __ _ \ \ \ \
+( ( )\___ | '_ | '_| | '_ \/ _` | \ \ \ \
+ \\/  ___)| |_)| | | | | || (_| |  ) ) ) )
+  '  |____| .__|_| |_|_| |_\__, | / / / /
+ =========|_|==============|___/=/_/_/_/
+
+ :: Spring Boot ::                (v4.0.4)
+
+2026-04-06T09:02:18.133+07:00  INFO 1872 --- [migration-db-web] [           main] o.e.m.MigrationDbWebApplicationTests     : Starting MigrationDbWebApplicationTests using Java 17.0.12 with PID 1872 (started by dongdd in C:\Users\dongdd\Documents\Development\migration-web\migration-db-web)
+2026-04-06T09:02:18.136+07:00  INFO 1872 --- [migration-db-web] [           main] o.e.m.MigrationDbWebApplicationTests     : No active profile set, falling back to 1 default profile: "default"
+2026-04-06T09:02:23.826+07:00  INFO 1872 --- [migration-db-web] [           main] o.s.m.s.b.SimpleBrokerMessageHandler     : Starting...
+2026-04-06T09:02:23.827+07:00  INFO 1872 --- [migration-db-web] [           main] o.s.m.s.b.SimpleBrokerMessageHandler     : BrokerAvailabilityEvent[available=true, SimpleBrokerMessageHandler [org.springframework.messaging.simp.broker.DefaultSubscriptionRegistry@a056b26]]
+2026-04-06T09:02:23.828+07:00  INFO 1872 --- [migration-db-web] [           main] o.s.m.s.b.SimpleBrokerMessageHandler     : Started.
+2026-04-06T09:02:23.839+07:00  INFO 1872 --- [migration-db-web] [           main] o.e.m.MigrationDbWebApplicationTests     : Started MigrationDbWebApplicationTests in 6.255 seconds (process running for 8.223)
+[INFO] Tests run: 1, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 8.095 s -- in org.example.migrationdbweb.MigrationDbWebApplicationTests
+[INFO] 
+[INFO] Results:
+[INFO] 
+[INFO] Tests run: 13, Failures: 0, Errors: 0, Skipped: 0
+[INFO] 
+[INFO] ------------------------------------------------------------------------
+[INFO] BUILD SUCCESS
+[INFO] ------------------------------------------------------------------------
+[INFO] Total time:  11.918 s
+[INFO] Finished at: 2026-04-06T09:02:25+07:00
+[INFO] ------------------------------------------------------------------------

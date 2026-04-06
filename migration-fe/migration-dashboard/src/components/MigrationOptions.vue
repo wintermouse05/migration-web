@@ -26,7 +26,7 @@
         <input
           v-model="localOptions.truncate"
           type="checkbox"
-          :disabled="localMode === 'STRUCTURE_ONLY'"
+          :disabled="isStructureOnlyMode"
         />
         Xoa du lieu cu truoc khi migrate (TRUNCATE)
       </label>
@@ -35,7 +35,7 @@
         <input
           v-model="localOptions.copyNewOnly"
           type="checkbox"
-          :disabled="localMode === 'STRUCTURE_ONLY'"
+          :disabled="isStructureOnlyMode"
         />
         Chi copy ban ghi moi (theo PK — bo qua trung lap)
       </label>
@@ -78,22 +78,22 @@
 
     <div class="options-grid">
       <label class="checkbox-item">
-        <input v-model="localOptions.migrateSequences" type="checkbox" />
+        <input v-model="localOptions.migrateSequences" type="checkbox" :disabled="isDataOnlyMode" />
         Sequences
       </label>
 
       <label class="checkbox-item">
-        <input v-model="localOptions.migrateIndexes" type="checkbox" />
+        <input v-model="localOptions.migrateIndexes" type="checkbox" :disabled="isDataOnlyMode" />
         Indexes
       </label>
 
       <label class="checkbox-item">
-        <input v-model="localOptions.migrateFunctions" type="checkbox" />
+        <input v-model="localOptions.migrateFunctions" type="checkbox" :disabled="isDataOnlyMode" />
         Functions / Procedures
       </label>
 
       <label class="checkbox-item">
-        <input v-model="localOptions.migrateTriggers" type="checkbox" />
+        <input v-model="localOptions.migrateTriggers" type="checkbox" :disabled="isDataOnlyMode" />
         Triggers
       </label>
     </div>
@@ -105,7 +105,7 @@
 
     <div class="options-grid">
       <label class="checkbox-item">
-        <input v-model="localOptions.migrateViews" type="checkbox" />
+        <input v-model="localOptions.migrateViews" type="checkbox" :disabled="isDataOnlyMode" />
         Migrate views
       </label>
 
@@ -113,7 +113,7 @@
         <input
           v-model="localOptions.replaceExistingViews"
           type="checkbox"
-          :disabled="!localOptions.migrateViews"
+          :disabled="isViewOptionsDisabled"
         />
         Thay the views da ton tai (DROP + CREATE)
       </label>
@@ -123,7 +123,7 @@
         <input
           v-model.trim="localOptions.includeViewsCsv"
           type="text"
-          :disabled="!localOptions.migrateViews"
+          :disabled="isViewOptionsDisabled"
           placeholder="v_emp_details,v_orders_sum"
           class="text-input"
         />
@@ -134,7 +134,7 @@
         <input
           v-model.trim="localOptions.excludeViewsCsv"
           type="text"
-          :disabled="!localOptions.migrateViews"
+          :disabled="isViewOptionsDisabled"
           placeholder="v_temp"
           class="text-input"
         />
@@ -252,6 +252,10 @@ const localMode = computed({
   get: () => props.migrationMode,
   set: (value) => emit('update:migrationMode', value)
 });
+
+const isStructureOnlyMode = computed(() => localMode.value === 'STRUCTURE_ONLY');
+const isDataOnlyMode = computed(() => localMode.value === 'DATA_ONLY');
+const isViewOptionsDisabled = computed(() => isDataOnlyMode.value || !localOptions.migrateViews);
 
 const localOptions = reactive({ ...props.options });
 const localRetry = reactive({ ...props.retry });

@@ -1,5 +1,6 @@
 package org.example.migrationdbweb.migratetool;
 import java.sql.Connection;
+import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.util.ArrayList;
@@ -118,8 +119,11 @@ public class MigrationWorker extends SwingWorker<Void, String> {
         ConnectionManager manager = ConnectionManager.getInstance();
         String sourcePoolId = "UI_SOURCE_" + System.currentTimeMillis();
         String targetPoolId = "UI_TARGET_" + System.currentTimeMillis();
+        String checkpointNamespace = retryPolicy.isResumeEnabled()
+            ? buildCheckpointNamespace(sourceConfig, targetConfig, sourceSchema, targetSchema)
+            : "";
         MigrationCheckpointStore checkpointStore = retryPolicy.isResumeEnabled()
-                ? new MigrationCheckpointStore(retryPolicy.getResumeStateFile())
+            ? new MigrationCheckpointStore(retryPolicy.getResumeStateFile(), checkpointNamespace)
                 : null;
 
         try {
@@ -156,6 +160,7 @@ public class MigrationWorker extends SwingWorker<Void, String> {
                     + " (resume theo offset + table-done state)");
                 if (checkpointStore != null) {
                     publish("Resume state file: " + checkpointStore.getStateFilePath());
+                    publish("Resume namespace: " + checkpointNamespace);
                     if (retryPolicy.isResetResumeState()) {
                         checkpointStore.clear();
                         publish("Resume state da duoc reset do MIGRATION_RESET_RESUME_STATE=true.");
@@ -209,11 +214,16 @@ public class MigrationWorker extends SwingWorker<Void, String> {
                 }
 
                 // ── Trích xuất VIEWS (với topological sort) ────────
-                // Luôn extract views (cho dù user có chọn migrate views hay không) vì
-                // 1. Filter include/exclude được áp dụng ềEphase tạo
-                // 2. Không extract = phải reconnect lại đềEextract + tạo
-                publish("Đang trích xuất VIEWS từ schema nguồn...");
-                allViews = extractAllViews(metadataExtractor, sourceConn, sourceSchema, sourceConfig.getType());
+                if (migrateViews && !isDataOnly) {
+                    publish("Đang trích xuất VIEWS từ schema nguồn...");
+                    allViews = extractAllViews(metadataExtractor, sourceConn, sourceSchema, sourceConfig.getType());
+                } else if (migrateViews) {
+                    publish("Bo qua trich xuat views do chon che do Data Only.");
+                    allViews = new ArrayList<>();
+                } else {
+                    publish("Bo qua trich xuat views (khong chon migrate views).");
+                    allViews = new ArrayList<>();
+                }
 
                 SqlDialect sourceDialect = DialectFactory.getDialect(sourceConfig.getType());
                 SqlDialect targetDialect = DialectFactory.getDialect(targetConfig.getType());
@@ -295,8 +305,8 @@ public class MigrationWorker extends SwingWorker<Void, String> {
                     publish("BềEqua bước thêm khóa ngoại do chọn chế đềEData Only.");
                 }
 
-                // ── VIEWS: chỉ chạy nếu user chọn migrate views ──
-                if (migrateViews) {
+                // ── VIEWS: chỉ chạy nếu user chọn migrate views và KHONG o DATA_ONLY ──
+                if (migrateViews && !isDataOnly) {
                     publish("--- TẠO VIEWS TRÊN TARGET ---");
                     runCreateViewsPhase(
                             targetConn,
@@ -307,6 +317,8 @@ public class MigrationWorker extends SwingWorker<Void, String> {
                             targetDialect,
                             replaceExistingViews
                     );
+                } else if (migrateViews) {
+                    publish("Bo qua views do chon che do Data Only.");
                 } else {
                     publish("Bo qua views (khong chon migrate views).");
                 }
@@ -611,32 +623,41 @@ public class MigrationWorker extends SwingWorker<Void, String> {
             List<TableDefinition> allTables,
             MigrationCheckpointStore checkpointStore
     ) throws SQLException {
-        List<TableDefinition> plannedTables = new ArrayList<>(allTables);
-        plannedTables.sort(Comparator.comparing(TableDefinition::getTableName, String.CASE_INSENSITIVE_ORDER));
+        List<TableMigrationPlan> plans = buildTableMigrationPlans(manager, sourcePoolId, allTables);
+        if (plans.isEmpty()) {
+            publish("Khong co bang nao de migrate trong phase data.");
+            setProgress(90);
+            return;
+        }
 
-        List<TableDefinition> runnableTables = new ArrayList<>();
-        for (TableDefinition table : plannedTables) {
+        publish("Da thong ke so dong cho " + plans.size()
+            + " bang. Se migrate theo FK-level truoc, sau do tang dan du lieu trong tung level.");
+
+        List<TableMigrationPlan> runnablePlans = new ArrayList<>();
+        for (TableMigrationPlan plan : plans) {
+            TableDefinition table = plan.table();
             if (checkpointStore != null && checkpointStore.isTableCompleted(table.getTableName())) {
                 publish("  -> Bo qua bang da migrate truoc do (resume): " + table.getTableName());
                 continue;
             }
-            runnableTables.add(table);
+            runnablePlans.add(plan);
         }
 
-        if (runnableTables.isEmpty()) {
+        if (runnablePlans.isEmpty()) {
             publish("Tat ca bang da hoan tat theo checkpoint. Bo qua phase data.");
             setProgress(90);
             return;
         }
 
-        int threadCount = resolveDataMigrationThreadCount(runnableTables.size());
-        publish("Data phase multithread: " + threadCount + " thread(s), " + runnableTables.size() + " bang can migrate.");
+        int threadCount = resolveDataMigrationThreadCount(runnablePlans.size());
+        publish("Data phase multithread: " + threadCount + " thread(s), " + runnablePlans.size() + " bang can migrate.");
 
         ExecutorService executor = Executors.newFixedThreadPool(threadCount);
         CompletionService<TableTransferOutcome> completionService = new ExecutorCompletionService<>(executor);
         int submitted = 0;
 
-        for (TableDefinition table : runnableTables) {
+        for (TableMigrationPlan plan : runnablePlans) {
+            TableDefinition table = plan.table();
             final String tableName = table.getTableName();
             final int startOffset = checkpointStore == null ? 0 : checkpointStore.getTableOffset(tableName);
             final boolean effectiveCopyNewOnly = copyNewOnly
@@ -657,7 +678,7 @@ public class MigrationWorker extends SwingWorker<Void, String> {
 
                 try {
                     DataTransferService transferService = new DataTransferService(sqlGenerator, retryPolicy);
-                    publish("Dang sao chep du lieu bang " + tableName + "...");
+                    publish("Dang sao chep du lieu bang " + tableName + " (rows=" + plan.rowCount() + ")...");
 
                     DataTransferService.TransferResult result = transferTableWithRetry(
                             manager,
@@ -750,6 +771,50 @@ public class MigrationWorker extends SwingWorker<Void, String> {
         int suggested = Math.min(4, maxByTable);
         return Math.max(1, Math.min(suggested, maxByPool));
     }
+
+    private List<TableMigrationPlan> buildTableMigrationPlans(
+            ConnectionManager manager,
+            String sourcePoolId,
+            List<TableDefinition> allTables
+    ) throws SQLException {
+        List<TableMigrationPlan> plans = new ArrayList<>();
+        SqlDialect sourceDialect = DialectFactory.getDialect(sourceConfig.getType());
+        Map<TableDefinition, Integer> fkLevels = TableDependencySortUtil.computeForeignKeyLevels(allTables);
+
+        try (Connection sourceConn = manager.getConnection(sourcePoolId)) {
+            configurePostgresSchema(sourceConn, sourceConfig, sourceSchema, false);
+
+            for (int i = 0; i < allTables.size(); i++) {
+                TableDefinition table = allTables.get(i);
+                long rowCount = countRowsForTable(sourceConn, table, sourceDialect);
+            int fkLevel = fkLevels.getOrDefault(table, 0);
+            plans.add(new TableMigrationPlan(table, rowCount, i, fkLevel));
+            }
+        }
+
+        plans.sort(
+            Comparator.comparingInt(TableMigrationPlan::fkLevel)
+                .thenComparingLong(TableMigrationPlan::rowCount)
+                        .thenComparingInt(TableMigrationPlan::originalOrder)
+        );
+        return plans;
+    }
+
+    private long countRowsForTable(Connection sourceConn, TableDefinition table, SqlDialect sourceDialect) {
+        String countSql = "SELECT COUNT(*) FROM " + sourceDialect.quoteIdentifier(table.getTableName());
+        try (Statement statement = sourceConn.createStatement();
+             ResultSet rs = statement.executeQuery(countSql)) {
+            if (rs.next()) {
+                return Math.max(0L, rs.getLong(1));
+            }
+        } catch (SQLException ex) {
+            publish("  -> [WARN] Khong the dem so dong bang " + table.getTableName()
+                    + ", se xep cuoi hang. Ly do: " + ex.getMessage());
+        }
+        return Long.MAX_VALUE;
+    }
+
+    private record TableMigrationPlan(TableDefinition table, long rowCount, int originalOrder, int fkLevel) {}
 
     private record TableTransferOutcome(
             String tableName,
@@ -1437,12 +1502,22 @@ public class MigrationWorker extends SwingWorker<Void, String> {
                                 ? targetDialect.quoteIdentifier(targetSchema)
                                         + "." + targetDialect.quoteIdentifier(vd.getViewName())
                                 : targetDialect.quoteIdentifier(vd.getViewName());
-                        String dropSql = "DROP VIEW IF EXISTS " + qualifiedViewName;
+
+                        String dropSql;
+                        if (targetDialect instanceof OracleDialect) {
+                            dropSql = "DROP VIEW " + qualifiedViewName;
+                        } else {
+                            dropSql = "DROP VIEW IF EXISTS " + qualifiedViewName;
+                        }
+
                         try {
                             stmt.execute(dropSql);
-                        } catch (SQLException ignored) {
-                            // ignore if not exists
+                        } catch (SQLException dropEx) {
+                            if (!isViewNotExistsError(dropEx)) {
+                                throw dropEx;
+                            }
                         }
+
                         stmt.execute(normalizeSqlForJdbc(createSql));
                         publish("  -> Da tao view: " + vd.getViewName());
                     } else {
@@ -1476,40 +1551,19 @@ public class MigrationWorker extends SwingWorker<Void, String> {
             String targetSchema,
             OracleToPgsqlTransformer transformer
     ) {
-        if (clause == null) return clause;
-        String result = clause;
-
-        // 1. Schema replacement -- an toan cho Oracle to PostgreSQL
-        //    PostgreSQL dung lowercase identifiers, Oracle dung UPPERCASE (quoted hoac khong)
-        if (sourceSchema != null && targetSchema != null
-                && !sourceSchema.equalsIgnoreCase(targetSchema)) {
-
-            // a) Quoted UPPERCASE: "SCOTT"."PRODUCTS" -> "public"."products"
-            result = result.replaceAll(
-                    "\"" + java.util.regex.Pattern.quote(sourceSchema) + "\"\\\\s*\\\\.\\\\s*",
-                    "\"" + targetSchema.toLowerCase() + "\".\""
-            );
-
-            // b) Unquoted identifier: SCOTT.PRODUCTS -> public.products
-            result = result.replaceAll(
-                    "(?<![a-zA-Z0-9_'\"])" + java.util.regex.Pattern.quote(sourceSchema) + "\\\\.([a-zA-Z_][a-zA-Z0-9_]*)",
-                    targetSchema.toLowerCase() + ".$1"
-            );
-
-            // c) Quoted table name after quoted schema: "public"."PRODUCTS" -> "public"."products"
-            result = result.replaceAll(
-                    "\"" + java.util.regex.Pattern.quote(targetSchema.toLowerCase()) + "\"\\\\s*\\\\.\\\\s*\"([^\"]+)\"",
-                    "\"" + targetSchema.toLowerCase() + "\".\"$1\""
-            );
-
-            // d) Lowercase source schema (Oracle view body may use lowercase "scott.products")
-            result = result.replaceAll(
-                    "(?i)" + java.util.regex.Pattern.quote(sourceSchema.toLowerCase()) + "\\\\.([a-zA-Z_][a-zA-Z0-9_]*)",
-                    targetSchema.toLowerCase() + ".$1"
-            );
+        if (clause == null) {
+            return clause;
         }
 
-        // 2. Oracle to PostgreSQL transformation
+        String result = clause;
+
+        // Remap schema prefix safely and avoid touching literals/comments.
+        if (sourceSchema != null && targetSchema != null
+                && !sourceSchema.equalsIgnoreCase(targetSchema)) {
+            result = OracleDialect.remapSchemaPrefixSafely(result, sourceSchema, targetSchema);
+        }
+
+        // Oracle to PostgreSQL transformation (if required by caller).
         if (transformer != null) {
             result = transformer.transform(result);
         }
@@ -1585,6 +1639,49 @@ public class MigrationWorker extends SwingWorker<Void, String> {
         return "42P06".equals(sqlState)
                 || (message.contains("already exists") && message.contains("view"))
                 || message.contains("ora-00955");
+    }
+
+    private static boolean isViewNotExistsError(SQLException e) {
+        if (e == null) {
+            return false;
+        }
+        String sqlState = e.getSQLState();
+        String message = e.getMessage() == null ? "" : e.getMessage().toLowerCase(Locale.ROOT);
+        return "42P01".equals(sqlState)
+                || (message.contains("does not exist") && message.contains("view"))
+                || message.contains("ora-00942")
+                || message.contains("ora-04043");
+    }
+
+    private static String buildCheckpointNamespace(
+            DatabaseConfig source,
+            DatabaseConfig target,
+            String sourceSchema,
+            String targetSchema
+    ) {
+        String sourceScope = String.join("|",
+                source == null || source.getType() == null ? "UNKNOWN" : source.getType().name(),
+                source == null ? "" : normalizeScopeValue(source.getHost()),
+                source == null ? "0" : String.valueOf(source.getPort()),
+                source == null ? "" : normalizeScopeValue(source.getDatabaseName()),
+                source == null ? "" : normalizeScopeValue(source.getUsername()),
+                normalizeScopeValue(sourceSchema)
+        );
+
+        String targetScope = String.join("|",
+                target == null || target.getType() == null ? "UNKNOWN" : target.getType().name(),
+                target == null ? "" : normalizeScopeValue(target.getHost()),
+                target == null ? "0" : String.valueOf(target.getPort()),
+                target == null ? "" : normalizeScopeValue(target.getDatabaseName()),
+                target == null ? "" : normalizeScopeValue(target.getUsername()),
+                normalizeScopeValue(targetSchema)
+        );
+
+        return sourceScope + "=>" + targetScope;
+    }
+
+    private static String normalizeScopeValue(String value) {
+        return value == null ? "" : value.trim().toLowerCase(Locale.ROOT);
     }
 
     /**
