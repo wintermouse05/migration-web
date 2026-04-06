@@ -113,6 +113,7 @@ const migrationMode = ref('ALL');
 const options = ref({
   truncate: false,
   copyNewOnly: false,
+  copyOnlyTargetEmptyTables: false,
   limit: 0,
   includeTablesCsv: '',
   excludeTablesCsv: '',

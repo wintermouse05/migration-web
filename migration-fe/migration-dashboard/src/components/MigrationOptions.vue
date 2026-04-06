@@ -40,6 +40,15 @@
         Chi copy ban ghi moi (theo PK — bo qua trung lap)
       </label>
 
+      <label class="checkbox-item">
+        <input
+          v-model="localOptions.copyOnlyTargetEmptyTables"
+          type="checkbox"
+          :disabled="isStructureOnlyMode"
+        />
+        Chi copy du lieu cho cac bang ma target dang rong
+      </label>
+
       <label class="field-row">
         <span>So dong toi da moi bang (Limit, 0 = tat ca)</span>
         <input

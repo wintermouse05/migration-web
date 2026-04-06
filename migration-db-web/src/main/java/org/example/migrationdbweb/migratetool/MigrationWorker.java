@@ -35,6 +35,7 @@ public class MigrationWorker extends SwingWorker<Void, String> {
     private final int dataThreadCount;
     private final boolean truncateTarget;
     private final boolean copyNewOnly;
+    private final boolean copyOnlyTargetEmptyTables;
     private final Integer limitRows;
     private final Set<String> includeTables;
     private final Set<String> excludeTables;
@@ -69,6 +70,7 @@ public class MigrationWorker extends SwingWorker<Void, String> {
             int dataThreadCount,
             boolean truncateTarget,
             boolean copyNewOnly,
+            boolean copyOnlyTargetEmptyTables,
             Integer limitRows,
             Set<String> includeTables,
             Set<String> excludeTables,
@@ -93,6 +95,7 @@ public class MigrationWorker extends SwingWorker<Void, String> {
         this.dataThreadCount = Math.max(0, dataThreadCount);
         this.truncateTarget = truncateTarget;
         this.copyNewOnly = copyNewOnly;
+        this.copyOnlyTargetEmptyTables = copyOnlyTargetEmptyTables;
         this.limitRows = (limitRows != null && limitRows > 0) ? limitRows : null;
         this.includeTables = normalizeTableFilter(includeTables);
         this.excludeTables = normalizeTableFilter(excludeTables);
@@ -147,6 +150,7 @@ public class MigrationWorker extends SwingWorker<Void, String> {
                 configurePostgresSchema(targetConn, targetConfig, targetSchema, true);
                 publish("Tùy chọn: truncate=" + truncateTarget
                     + ", copyNewOnly=" + copyNewOnly
+                    + ", copyOnlyTargetEmptyTables=" + copyOnlyTargetEmptyTables
                     + ", limit=" + (limitRows == null ? "ALL" : limitRows));
                 publish("Filter bảng: include="
                         + (includeTables.isEmpty() ? "ALL" : String.join(",", includeTables))
@@ -633,14 +637,27 @@ public class MigrationWorker extends SwingWorker<Void, String> {
         publish("Da thong ke so dong cho " + plans.size()
             + " bang. Se migrate theo FK-level truoc, sau do tang dan du lieu trong tung level.");
 
+        SqlDialect targetDialect = DialectFactory.getDialect(targetConfig.getType());
         List<TableMigrationPlan> runnablePlans = new ArrayList<>();
-        for (TableMigrationPlan plan : plans) {
-            TableDefinition table = plan.table();
-            if (checkpointStore != null && checkpointStore.isTableCompleted(table.getTableName())) {
-                publish("  -> Bo qua bang da migrate truoc do (resume): " + table.getTableName());
-                continue;
+        try (Connection targetPlanConn = manager.getConnection(targetPoolId)) {
+            configurePostgresSchema(targetPlanConn, targetConfig, targetSchema, true);
+
+            for (TableMigrationPlan plan : plans) {
+                TableDefinition table = plan.table();
+                if (checkpointStore != null && checkpointStore.isTableCompleted(table.getTableName())) {
+                    publish("  -> Bo qua bang da migrate truoc do (resume): " + table.getTableName());
+                    continue;
+                }
+
+                if (copyOnlyTargetEmptyTables
+                        && !isTargetTableEmpty(targetPlanConn, table, targetDialect)) {
+                    publish("  -> Bo qua bang " + table.getTableName()
+                            + " vi target da co du lieu (copy-only-target-empty). ");
+                    continue;
+                }
+
+                runnablePlans.add(plan);
             }
-            runnablePlans.add(plan);
         }
 
         if (runnablePlans.isEmpty()) {
@@ -812,6 +829,35 @@ public class MigrationWorker extends SwingWorker<Void, String> {
                     + ", se xep cuoi hang. Ly do: " + ex.getMessage());
         }
         return Long.MAX_VALUE;
+    }
+
+    private boolean isTargetTableEmpty(Connection targetConn, TableDefinition table, SqlDialect targetDialect) {
+        String sql = buildTargetHasDataSql(table, targetDialect);
+        try (Statement statement = targetConn.createStatement();
+             ResultSet rs = statement.executeQuery(sql)) {
+            return !rs.next();
+        } catch (SQLException ex) {
+            publish("  -> [WARN] Khong the kiem tra target co du lieu hay khong cho bang "
+                    + table.getTableName() + ". Se coi nhu bang da co du lieu. Ly do: " + ex.getMessage());
+            return false;
+        }
+    }
+
+    private String buildTargetHasDataSql(TableDefinition table, SqlDialect targetDialect) {
+        if (targetDialect == null) {
+            throw new IllegalArgumentException("Target dialect khong hop le");
+        }
+
+        String targetTableName = table.getTableName();
+        if (targetDialect instanceof OracleDialect) {
+            targetTableName = targetTableName.toUpperCase(Locale.ROOT);
+        }
+
+        String quotedTable = targetDialect.quoteIdentifier(targetTableName);
+        if (targetDialect instanceof OracleDialect) {
+            return "SELECT 1 FROM " + quotedTable + " WHERE ROWNUM = 1";
+        }
+        return "SELECT 1 FROM " + quotedTable + " LIMIT 1";
     }
 
     private record TableMigrationPlan(TableDefinition table, long rowCount, int originalOrder, int fkLevel) {}

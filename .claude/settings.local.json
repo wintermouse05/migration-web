@@ -45,7 +45,8 @@
       "Bash(cmd /c \"mvnw.cmd compile 2>&1\")",
       "Bash(cmd.exe /c \"mvnw.cmd compile 2>&1\")",
       "Bash(powershell -Command \"cd ''c:/Users/dongdd/Documents/Development/migration-web/migration-db-web''; ./mvnw.cmd compile 2>&1 | Select-Object -Last 30\")",
-      "Bash(powershell -Command \"cd ''c:/Users/dongdd/Documents/Development/migration-web/migration-db-web''; ./mvnw.cmd clean compile 2>&1 | Select-Object -Last 40\")"
+      "Bash(powershell -Command \"cd ''c:/Users/dongdd/Documents/Development/migration-web/migration-db-web''; ./mvnw.cmd clean compile 2>&1 | Select-Object -Last 40\")",
+      "Bash(dir \"c:\\\\Users\\\\dongdd\\\\Documents\\\\Development\\\\migration-web\\\\migration-db-web\")"
     ]
   }
 }

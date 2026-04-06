@@ -53,7 +53,7 @@ public class MigrationAppUI extends JFrame {
 
     // --- UI Fields: Migration mode ---
     private JRadioButton optCopyAll, optStructureOnly, optDataOnly;
-    private JCheckBox chkTruncateTarget, chkCopyNewOnly;
+    private JCheckBox chkTruncateTarget, chkCopyNewOnly, chkCopyOnlyTargetEmptyTables;
     private JTextField limitDataField, batchSizeField;
     private JTextField dataThreadsField;
     private JTextField includeTablesField, excludeTablesField;
@@ -139,6 +139,9 @@ public class MigrationAppUI extends JFrame {
         }
         if (chkCopyNewOnly != null) {
             chkCopyNewOnly.setEnabled(!structureOnly);
+        }
+        if (chkCopyOnlyTargetEmptyTables != null) {
+            chkCopyOnlyTargetEmptyTables.setEnabled(!structureOnly);
         }
 
         boolean allowDdlOptions = !dataOnly;
@@ -305,12 +308,14 @@ public class MigrationAppUI extends JFrame {
 
     private JPanel createSection2CoreOptionsPanel() {
         JPanel section = createOptionSection("2. TUY CHON CO BAN");
-        JPanel content = new JPanel(new GridLayout(5, 1, 4, 4));
+        JPanel content = new JPanel(new GridLayout(6, 1, 4, 4));
 
         chkTruncateTarget = new JCheckBox("Xoa du lieu cu target truoc khi migrate (TRUNCATE)");
         chkCopyNewOnly = new JCheckBox("Chi copy ban ghi moi (theo PK — bo qua trung lap)");
+        chkCopyOnlyTargetEmptyTables = new JCheckBox("Chi copy data cho cac bang target dang rong");
         content.add(chkTruncateTarget);
         content.add(chkCopyNewOnly);
+        content.add(chkCopyOnlyTargetEmptyTables);
 
         JPanel row2 = new JPanel(new FlowLayout(FlowLayout.LEFT, 5, 0));
         row2.add(new JLabel("Batch size (rows/batch):"));
@@ -485,6 +490,7 @@ public class MigrationAppUI extends JFrame {
         boolean isDataOnly = optDataOnly.isSelected();
         boolean truncateTarget = chkTruncateTarget.isSelected();
         boolean copyNewOnly = chkCopyNewOnly.isSelected();
+        boolean copyOnlyTargetEmptyTables = chkCopyOnlyTargetEmptyTables.isSelected();
 
         Integer limitRows = parseIntField(limitDataField, 0, "Limit");
         int batchSize = parseIntField(batchSizeField, 1000, "Batch size");
@@ -559,7 +565,9 @@ public class MigrationAppUI extends JFrame {
         appendLog("Mode: " + (isStructureOnly ? "STRUCTURE_ONLY" : isDataOnly ? "DATA_ONLY" : "ALL"));
         appendLog("Batch size: " + batchSize + " | Limit: " + (limitRows == null ? "ALL" : limitRows));
         appendLog("Data threads: " + (dataThreads == 0 ? "AUTO" : dataThreads));
-        appendLog("Truncate: " + truncateTarget + " | CopyNewOnly: " + copyNewOnly);
+        appendLog("Truncate: " + truncateTarget
+            + " | CopyNewOnly: " + copyNewOnly
+            + " | CopyOnlyTargetEmptyTables: " + copyOnlyTargetEmptyTables);
         appendLog("Retry: enabled=" + retryEnabled + " attempts=" + retryMaxAttempts
                 + " delay=" + retryDelayMs + "ms backoff=" + retryBackoff);
         appendLog("Resume: enabled=" + resumeEnabled + " file=" + (resumeEnabled ? resumeStateFile : "N/A"));
@@ -581,6 +589,7 @@ public class MigrationAppUI extends JFrame {
                 dataThreads,
                 truncateTarget,
                 copyNewOnly,
+                copyOnlyTargetEmptyTables,
                 limitRows,
                 includeTables,
                 excludeTables,

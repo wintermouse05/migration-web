@@ -54,6 +54,7 @@ public class MigrationRequest {
     public static class MigrationOptions {
         private boolean truncate;
         private boolean copyNewOnly;
+        private boolean copyOnlyTargetEmptyTables;
         private int limit;
         private String includeTablesCsv = "";
         private String excludeTablesCsv = "";

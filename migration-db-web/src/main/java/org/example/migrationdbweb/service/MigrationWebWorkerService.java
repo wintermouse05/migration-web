@@ -225,7 +225,8 @@ public class MigrationWebWorkerService {
                             retryPolicy,
                             checkpointStore,
                             limitRows,
-                            options.isCopyNewOnly()
+                                options.isCopyNewOnly(),
+                                options.isCopyOnlyTargetEmptyTables()
                     );
                 } else {
                     broadcastStatus(85, "RUNNING", "Bo qua migrate du lieu (STRUCTURE_ONLY).", true);
@@ -979,7 +980,8 @@ public class MigrationWebWorkerService {
             MigrationRetryPolicy retryPolicy,
             MigrationCheckpointStore checkpointStore,
             Integer limitRows,
-            boolean copyNewOnly
+                boolean copyNewOnly,
+                boolean copyOnlyTargetEmptyTables
     ) throws SQLException {
         List<TableMigrationPlan> plans = buildTableMigrationPlans(sourceConn, orderedTableDefinitions, sourceDialect);
         if (plans.isEmpty()) {
@@ -995,14 +997,33 @@ public class MigrationWebWorkerService {
         broadcastStatus(60, "RUNNING",
                 "Bat dau phase data multithread voi " + threadCount + " thread(s).", true);
 
+        if (targetConfig == null || targetConfig.getType() == null) {
+            throw new SQLException("Khong xac dinh duoc target dialect de kiem tra du lieu target.");
+        }
+        SqlDialect targetDialect = DialectFactory.getDialect(targetConfig.getType());
         List<TableMigrationPlan> runnablePlans = new ArrayList<>();
-        for (TableMigrationPlan plan : plans) {
-            if (checkpointStore != null && checkpointStore.isTableCompleted(plan.table().getTableName())) {
-                broadcastStatus(60, "RUNNING",
-                        "Bo qua bang da migrate (resume): " + plan.table().getTableName(), true);
-                continue;
+        try (Connection targetPlanConn = manager.getConnection(targetPoolId)) {
+            configurePostgresSchema(targetPlanConn, targetConfig, targetSchema, true);
+
+            for (TableMigrationPlan plan : plans) {
+                String tableName = plan.table().getTableName();
+                if (checkpointStore != null && checkpointStore.isTableCompleted(tableName)) {
+                    broadcastStatus(60, "RUNNING",
+                            "Bo qua bang da migrate (resume): " + tableName, true);
+                    continue;
+                }
+
+                if (copyOnlyTargetEmptyTables
+                        && !isTargetTableEmpty(targetPlanConn, plan.table(), targetDialect)) {
+                    broadcastStatus(60, "RUNNING",
+                            "Bo qua bang " + tableName
+                                    + " vi target da co du lieu (copy-only-target-empty).",
+                            true);
+                    continue;
+                }
+
+                runnablePlans.add(plan);
             }
-            runnablePlans.add(plan);
         }
 
         if (runnablePlans.isEmpty()) {
@@ -1190,6 +1211,35 @@ public class MigrationWebWorkerService {
                     + ", se xep cuoi hang migrate. Ly do: " + ex.getMessage());
         }
         return Long.MAX_VALUE;
+    }
+
+    private boolean isTargetTableEmpty(Connection targetConn, TableDefinition table, SqlDialect targetDialect) {
+        String sql = buildTargetHasDataSql(table, targetDialect);
+        try (Statement statement = targetConn.createStatement();
+             ResultSet rs = statement.executeQuery(sql)) {
+            return !rs.next();
+        } catch (SQLException ex) {
+            System.err.println("WARN: Khong the kiem tra target co du lieu cho bang " + table.getTableName()
+                    + ". Se coi nhu bang da co du lieu. Ly do: " + ex.getMessage());
+            return false;
+        }
+    }
+
+    private String buildTargetHasDataSql(TableDefinition table, SqlDialect targetDialect) {
+        if (targetDialect == null) {
+            throw new IllegalArgumentException("Target dialect khong hop le");
+        }
+
+        String targetTableName = table.getTableName();
+        if (targetDialect instanceof OracleDialect) {
+            targetTableName = targetTableName.toUpperCase(Locale.ROOT);
+        }
+
+        String quotedTable = targetDialect.quoteIdentifier(targetTableName);
+        if (targetDialect instanceof OracleDialect) {
+            return "SELECT 1 FROM " + quotedTable + " WHERE ROWNUM = 1";
+        }
+        return "SELECT 1 FROM " + quotedTable + " LIMIT 1";
     }
 
     private int resolveDataMigrationThreadCount(int tableCount, DatabaseConfig sourceConfig, DatabaseConfig targetConfig) {
