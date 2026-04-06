@@ -76,6 +76,9 @@ public class MigrationWebWorkerService {
             MigrationRequest.MigrationOptions options = request.getOptions() == null
                     ? new MigrationRequest.MigrationOptions()
                     : request.getOptions();
+            MigrationRequest.ResumeOptions resumeOptions = request.getResume() == null
+                ? new MigrationRequest.ResumeOptions()
+                : request.getResume();
 
             Set<String> includeTables = parseCsvTableSet(options.getIncludeTablesCsv());
             Set<String> excludeTables = parseCsvTableSet(options.getExcludeTablesCsv());
@@ -161,19 +164,11 @@ public class MigrationWebWorkerService {
                 }
 
                 if (!structureOnly) {
-                    if (options.isTruncate()) {
-                        broadcastStatus(58, "RUNNING", "Dang xoa du lieu cu tren target (truncate)...", true);
-                        runTruncatePhase(targetConn, orderedTableDefinitions, targetDialect);
-                    }
-
-                    broadcastStatus(60, "RUNNING", "Dang chuyen du lieu bang...", true);
-                    SqlGenerator sqlGenerator = new SqlGenerator(sourceDialect, targetDialect);
-
                     // ── Retry / Resume setup ──────────────────────────────────────────
                     MigrationRetryPolicy retryPolicy = buildRetryPolicy(request.getRetry());
                     MigrationCheckpointStore checkpointStore = null;
 
-                    if (request.getResume().isEnabled()) {
+                    if (resumeOptions.isEnabled()) {
                         String checkpointNamespace = buildCheckpointNamespace(
                             request.getSource(),
                             request.getTarget(),
@@ -181,10 +176,10 @@ public class MigrationWebWorkerService {
                             targetSchema
                         );
                         checkpointStore = new MigrationCheckpointStore(
-                            request.getResume().getStateFile(),
+                            resumeOptions.getStateFile(),
                             checkpointNamespace
                         );
-                        if (request.getResume().isReset()) {
+                        if (resumeOptions.isReset()) {
                             checkpointStore.clear();
                             broadcastStatus(60, "RUNNING",
                                     "[RESUME] Reset checkpoint file: " + checkpointStore.getStateFilePath(), true);
@@ -194,6 +189,19 @@ public class MigrationWebWorkerService {
                                 + ", namespace=" + checkpointNamespace,
                             true);
                     }
+
+                    if (options.isTruncate()) {
+                        broadcastStatus(58, "RUNNING", "Dang xoa du lieu cu tren target (truncate)...", true);
+                        runTruncatePhase(targetConn, orderedTableDefinitions, targetDialect);
+                        if (checkpointStore != null) {
+                            checkpointStore.clear();
+                            broadcastStatus(58, "RUNNING",
+                                    "[RESUME] Da clear checkpoint sau truncate de tranh bo qua bang da danh dau hoan tat.", true);
+                        }
+                    }
+
+                    broadcastStatus(60, "RUNNING", "Dang chuyen du lieu bang...", true);
+                    SqlGenerator sqlGenerator = new SqlGenerator(sourceDialect, targetDialect);
 
                     if (retryPolicy.isRetryEnabled()) {
                         broadcastStatus(60, "RUNNING",

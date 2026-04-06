@@ -12,6 +12,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 
 public class MigrationCheckpointStore {
+    private static final String DEFAULT_STATE_FILE = ".migration-resume.properties";
     private static final String OFFSET_SUFFIX = ".offset";
     private static final String DONE_SUFFIX = ".done";
     private static final ConcurrentMap<Path, Object> FILE_LOCKS = new ConcurrentHashMap<>();
@@ -26,7 +27,7 @@ public class MigrationCheckpointStore {
     }
 
     public MigrationCheckpointStore(String stateFile, String namespace) {
-        this.statePath = Paths.get(stateFile).toAbsolutePath().normalize();
+        this.statePath = Paths.get(normalizeStateFile(stateFile)).toAbsolutePath().normalize();
         this.properties = new Properties();
         this.fileLock = FILE_LOCKS.computeIfAbsent(this.statePath, ignored -> new Object());
         this.namespacePrefix = normalizeNamespace(namespace);
@@ -121,6 +122,13 @@ public class MigrationCheckpointStore {
         }
         return namespace.trim().toUpperCase(Locale.ROOT)
                 .replaceAll("[^A-Z0-9._-]", "_");
+    }
+
+    private static String normalizeStateFile(String stateFile) {
+        if (stateFile == null || stateFile.isBlank()) {
+            return DEFAULT_STATE_FILE;
+        }
+        return stateFile.trim();
     }
 
     private static String normalizeTableName(String tableName) {
