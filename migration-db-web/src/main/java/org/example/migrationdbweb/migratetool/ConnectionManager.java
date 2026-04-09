@@ -38,9 +38,11 @@ public class ConnectionManager {
 
         if (config.getType() == DatabaseType.POSTGRESQL) {
             normalizeJvmTimezoneForPostgres();
-            // Tránh lỗi khi JVM timezone (vd: Asia/Saigon) không được PostgreSQL nhận diện.
-            hikariConfig.addDataSourceProperty("options", "-c TimeZone=UTC");
-            hikariConfig.addDataSourceProperty("TimeZone", "UTC");
+            if (!JdbcUrlParamResolver.hasExplicitPostgresTimezoneParam(config.getJdbcUrlValue())) {
+                // Tránh lỗi khi JVM timezone (vd: Asia/Saigon) không được PostgreSQL nhận diện.
+                hikariConfig.addDataSourceProperty("options", "-c TimeZone=UTC");
+                hikariConfig.addDataSourceProperty("TimeZone", "UTC");
+            }
         }
 
         // Các cấu hình tối ưu cho HikariCP

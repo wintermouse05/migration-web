@@ -10,6 +10,7 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.CompletionService;
 import java.util.concurrent.ExecutionException;
@@ -32,6 +33,7 @@ import org.example.migrationdbweb.migratetool.DatabaseType;
 import org.example.migrationdbweb.migratetool.DialectFactory;
 import org.example.migrationdbweb.migratetool.FunctionDefinition;
 import org.example.migrationdbweb.migratetool.IndexDefinition;
+import org.example.migrationdbweb.migratetool.JdbcUrlParamResolver;
 import org.example.migrationdbweb.migratetool.MetadataExtractor;
 import org.example.migrationdbweb.migratetool.MigrationCheckpointStore;
 import org.example.migrationdbweb.migratetool.MigrationRetryPolicy;
@@ -321,9 +323,12 @@ public class MigrationWebWorkerService {
             manager.createPool(poolId, config);
             boolean connected = manager.testConnection(poolId);
             if (connected) {
+                String endpoint = hasExplicitJdbcUrl(config)
+                        ? config.getJdbcUrlValue().trim()
+                        : config.getHost() + ":" + config.getPort();
                 return Map.of(
                         "success", true,
-                        "message", "Ket noi thanh cong toi " + config.getType() + " @ " + config.getHost() + ":" + config.getPort()
+                        "message", "Ket noi thanh cong toi " + config.getType() + " @ " + endpoint
                 );
             }
 
@@ -363,6 +368,14 @@ public class MigrationWebWorkerService {
 
         if (config.getSchemaName() != null && !config.getSchemaName().isBlank()) {
             return config.getSchemaName().trim();
+        }
+
+        String jdbcUrl = config.getJdbcUrlValue();
+        Optional<String> schemaFromUrl = config.getType() == DatabaseType.ORACLE
+                ? JdbcUrlParamResolver.resolveOracleSchemaFromUrl(jdbcUrl)
+                : JdbcUrlParamResolver.resolvePostgresSchemaFromUrl(jdbcUrl);
+        if (schemaFromUrl.isPresent()) {
+            return schemaFromUrl.get();
         }
 
         if (config.getType() == DatabaseType.ORACLE) {
@@ -1576,11 +1589,20 @@ public class MigrationWebWorkerService {
             return false;
         }
 
-        boolean samePhysicalEndpoint = source.getType() == target.getType()
-                && normalize(source.getHost()).equals(normalize(target.getHost()))
-                && source.getPort() == target.getPort()
-                && normalize(source.getDatabaseName()).equals(normalize(target.getDatabaseName()))
-                && normalize(source.getUsername()).equals(normalize(target.getUsername()));
+        boolean bothHaveJdbcUrl = hasExplicitJdbcUrl(source) && hasExplicitJdbcUrl(target);
+        boolean samePhysicalEndpoint;
+
+        if (bothHaveJdbcUrl) {
+            samePhysicalEndpoint = source.getType() == target.getType()
+                    && normalizeJdbcUrl(source.getJdbcUrlValue()).equals(normalizeJdbcUrl(target.getJdbcUrlValue()))
+                    && normalize(source.getUsername()).equals(normalize(target.getUsername()));
+        } else {
+            samePhysicalEndpoint = source.getType() == target.getType()
+                    && normalize(source.getHost()).equals(normalize(target.getHost()))
+                    && source.getPort() == target.getPort()
+                    && normalize(source.getDatabaseName()).equals(normalize(target.getDatabaseName()))
+                    && normalize(source.getUsername()).equals(normalize(target.getUsername()));
+        }
 
         if (!samePhysicalEndpoint) {
             return false;
@@ -1605,6 +1627,32 @@ public class MigrationWebWorkerService {
         return value == null ? "" : value.trim().toLowerCase(Locale.ROOT);
     }
 
+    private static String normalizeJdbcUrl(String value) {
+        return normalize(value);
+    }
+
+    private static boolean hasExplicitJdbcUrl(DatabaseConfig config) {
+        return config != null
+                && config.getJdbcUrlValue() != null
+                && !config.getJdbcUrlValue().isBlank();
+    }
+
+    private static String endpointScope(DatabaseConfig config) {
+        if (config == null) {
+            return "";
+        }
+
+        if (hasExplicitJdbcUrl(config)) {
+            return "jdbc:" + normalizeJdbcUrl(config.getJdbcUrlValue());
+        }
+
+        return String.join("|",
+                normalize(config.getHost()),
+                String.valueOf(config.getPort()),
+                normalize(config.getDatabaseName())
+        );
+    }
+
     private static String buildCheckpointNamespace(
             DatabaseConfig source,
             DatabaseConfig target,
@@ -1613,18 +1661,14 @@ public class MigrationWebWorkerService {
     ) {
         String sourceScope = String.join("|",
                 source == null || source.getType() == null ? "UNKNOWN" : source.getType().name(),
-                source == null ? "" : normalize(source.getHost()),
-                source == null ? "0" : String.valueOf(source.getPort()),
-                source == null ? "" : normalize(source.getDatabaseName()),
+            endpointScope(source),
                 source == null ? "" : normalize(source.getUsername()),
                 normalize(sourceSchema)
         );
 
         String targetScope = String.join("|",
                 target == null || target.getType() == null ? "UNKNOWN" : target.getType().name(),
-                target == null ? "" : normalize(target.getHost()),
-                target == null ? "0" : String.valueOf(target.getPort()),
-                target == null ? "" : normalize(target.getDatabaseName()),
+            endpointScope(target),
                 target == null ? "" : normalize(target.getUsername()),
                 normalize(targetSchema)
         );

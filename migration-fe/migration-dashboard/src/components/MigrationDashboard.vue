@@ -91,6 +91,7 @@ const stompClient = ref(null);
 
 const sourceDb = ref({
   type: 'ORACLE',
+  jdbcUrl: '',
   host: 'localhost',
   port: 1521,
   databaseName: 'ORCL',
@@ -101,6 +102,7 @@ const sourceDb = ref({
 
 const targetDb = ref({
   type: 'POSTGRESQL',
+  jdbcUrl: '',
   host: '127.0.0.1',
   port: 5432,
   databaseName: 'migration_db',
@@ -145,14 +147,28 @@ const savedCredentials = ref([]);
 const selectedSourceCredentialId = ref('');
 const selectedTargetCredentialId = ref('');
 
+const hasJdbcUrl = (config) => {
+  return Boolean(config?.jdbcUrl && String(config.jdbcUrl).trim());
+};
+
+const hasConnectionIdentity = (config) => {
+  if (hasJdbcUrl(config)) {
+    return true;
+  }
+
+  return Boolean(
+    config?.host &&
+      config?.databaseName &&
+      Number(config?.port) > 0
+  );
+};
+
 const canStartMigration = computed(() => {
   return Boolean(
     !isMigrating.value &&
-      sourceDb.value.host &&
-      sourceDb.value.databaseName &&
+      hasConnectionIdentity(sourceDb.value) &&
       sourceDb.value.username &&
-      targetDb.value.host &&
-      targetDb.value.databaseName &&
+      hasConnectionIdentity(targetDb.value) &&
       targetDb.value.username
   );
 });
@@ -315,6 +331,7 @@ const normalizeDatabaseConfig = (rawConfig) => {
 
   return {
     type: rawConfig.type || 'POSTGRESQL',
+    jdbcUrl: rawConfig.jdbcUrl || '',
     host: rawConfig.host || '',
     port: Number(rawConfig.port) || 0,
     databaseName: rawConfig.databaseName || '',

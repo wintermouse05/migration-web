@@ -5,16 +5,26 @@ package org.example.migrationdbweb.migratetool;
 
 import java.awt.BorderLayout;
 import java.awt.Color;
+import java.awt.Component;
+import java.awt.Cursor;
 import java.awt.Dimension;
 import java.awt.FlowLayout;
 import java.awt.Font;
+import java.awt.GradientPaint;
+import java.awt.Graphics;
+import java.awt.Graphics2D;
 import java.awt.GridLayout;
+import java.awt.Insets;
+import java.awt.RenderingHints;
+import java.awt.event.ComponentAdapter;
+import java.awt.event.ComponentEvent;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 
+import javax.swing.AbstractButton;
 import javax.swing.BorderFactory;
 import javax.swing.Box;
 import javax.swing.ButtonGroup;
@@ -30,23 +40,31 @@ import javax.swing.JPasswordField;
 import javax.swing.JProgressBar;
 import javax.swing.JRadioButton;
 import javax.swing.JScrollPane;
+import javax.swing.JSplitPane;
 import javax.swing.JTextArea;
 import javax.swing.JTextField;
 import javax.swing.SwingUtilities;
 import javax.swing.UIManager;
 import javax.swing.UnsupportedLookAndFeelException;
 import javax.swing.border.TitledBorder;
+import javax.swing.event.DocumentEvent;
+import javax.swing.event.DocumentListener;
 
 public class MigrationAppUI extends JFrame {
 
+    private static final Font UI_FONT = new Font("Segoe UI", Font.PLAIN, 13);
+    private static final Font UI_TITLE_FONT = new Font("Segoe UI", Font.BOLD, 13);
+
     // --- UI Fields: Source DB ---
     private JComboBox<String> sourceDbTypeCombo;
+    private JTextField sourceUrlField;
     private JTextField sourceHostField, sourcePortField, sourceDbNameField, sourceUserField;
     private JPasswordField sourcePassField;
     private JTextField sourceSchemaField;
 
     // --- UI Fields: Target DB ---
     private JComboBox<String> targetDbTypeCombo;
+    private JTextField targetUrlField;
     private JTextField targetHostField, targetPortField, targetDbNameField, targetUserField;
     private JPasswordField targetPassField;
     private JTextField targetSchemaField;
@@ -78,6 +96,19 @@ public class MigrationAppUI extends JFrame {
     private JTextArea logArea;
     private JProgressBar progressBar;
 
+    // --- Responsive layout containers ---
+    private JPanel dbConfigPanel;
+    private JPanel sourceDbSectionPanel;
+    private JPanel targetDbSectionPanel;
+    private JPanel optionsContentPanel;
+    private JPanel sectionModePanel;
+    private JPanel sectionCorePanel;
+    private JPanel sectionAdvancedPanel;
+    private JPanel sectionViewsPanel;
+    private JPanel sectionRetryPanel;
+    private JPanel sectionResumePanel;
+    private boolean portraitLayoutActive;
+
     // --- Saved credentials (JSON local file) ---
     private JComboBox<String> sourceCredentialCombo;
     private JComboBox<String> targetCredentialCombo;
@@ -86,7 +117,8 @@ public class MigrationAppUI extends JFrame {
 
     public MigrationAppUI() {
         setTitle("Database Migration Tool");
-        setSize(1050, 820);
+        setSize(1280, 860);
+        setMinimumSize(new Dimension(820, 760));
         setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
         setLocationRelativeTo(null);
         setLayout(new BorderLayout(10, 10));
@@ -94,25 +126,155 @@ public class MigrationAppUI extends JFrame {
     }
 
     private void initComponents() {
-        // NORTH: DB config panels
-        JPanel dbConfigPanel = new JPanel(new GridLayout(1, 2, 10, 0));
-        dbConfigPanel.setBorder(BorderFactory.createEmptyBorder(10, 10, 10, 10));
-        dbConfigPanel.add(createDbConfigPanel("Source Database (Nguồn)", true));
-        dbConfigPanel.add(createDbConfigPanel("Target Database (Đích)", false));
-        add(dbConfigPanel, BorderLayout.NORTH);
+        JPanel mainContent = new JPanel();
+        mainContent.setLayout(new javax.swing.BoxLayout(mainContent, javax.swing.BoxLayout.Y_AXIS));
+        mainContent.setBorder(BorderFactory.createEmptyBorder(10, 10, 10, 10));
 
-        // CENTER: Options panel
+        dbConfigPanel = new JPanel();
+        dbConfigPanel.setAlignmentX(Component.LEFT_ALIGNMENT);
+        sourceDbSectionPanel = createDbConfigPanel("Source Database (Nguồn)", true);
+        targetDbSectionPanel = createDbConfigPanel("Target Database (Đích)", false);
+        mainContent.add(dbConfigPanel);
+        mainContent.add(Box.createVerticalStrut(10));
+
         JPanel optionsPanel = createOptionsPanel();
-        add(optionsPanel, BorderLayout.CENTER);
+        optionsPanel.setAlignmentX(Component.LEFT_ALIGNMENT);
+        mainContent.add(optionsPanel);
+        mainContent.add(Box.createVerticalGlue());
 
-        // SOUTH: Progress + Logs + Action button
+        JScrollPane topScrollPane = new JScrollPane(mainContent);
+        topScrollPane.setBorder(BorderFactory.createEmptyBorder());
+        topScrollPane.setHorizontalScrollBarPolicy(JScrollPane.HORIZONTAL_SCROLLBAR_NEVER);
+        topScrollPane.getVerticalScrollBar().setUnitIncrement(16);
+
         JPanel bottomPanel = createBottomPanel();
-        add(bottomPanel, BorderLayout.SOUTH);
+
+        JSplitPane splitPane = new JSplitPane(JSplitPane.VERTICAL_SPLIT, topScrollPane, bottomPanel);
+        splitPane.setResizeWeight(0.68);
+        splitPane.setOneTouchExpandable(true);
+        splitPane.setBorder(BorderFactory.createEmptyBorder());
+        add(splitPane, BorderLayout.CENTER);
 
         bindOptionStateListeners();
         updateModeDependentOptionsState();
 
         refreshSavedCredentialsCombos();
+
+        bindResponsiveContentListeners();
+        applyResponsiveLayout(shouldUsePortraitLayout());
+        addComponentListener(new ComponentAdapter() {
+            @Override
+            public void componentResized(ComponentEvent e) {
+                applyResponsiveLayout(shouldUsePortraitLayout());
+            }
+        });
+    }
+
+    private void bindResponsiveContentListeners() {
+        DocumentListener listener = new DocumentListener() {
+            @Override
+            public void insertUpdate(DocumentEvent e) {
+                refreshResponsiveLayout();
+            }
+
+            @Override
+            public void removeUpdate(DocumentEvent e) {
+                refreshResponsiveLayout();
+            }
+
+            @Override
+            public void changedUpdate(DocumentEvent e) {
+                refreshResponsiveLayout();
+            }
+        };
+
+        addResponsiveDocumentListener(sourceHostField, listener);
+        addResponsiveDocumentListener(targetHostField, listener);
+        addResponsiveDocumentListener(sourceUrlField, listener);
+        addResponsiveDocumentListener(targetUrlField, listener);
+    }
+
+    private void addResponsiveDocumentListener(JTextField field, DocumentListener listener) {
+        if (field != null && field.getDocument() != null) {
+            field.getDocument().addDocumentListener(listener);
+        }
+    }
+
+    private void refreshResponsiveLayout() {
+        SwingUtilities.invokeLater(() -> applyResponsiveLayout(shouldUsePortraitLayout()));
+    }
+
+    private boolean shouldUsePortraitLayout() {
+        return getHeight() > getWidth() || shouldStackByDbContentWidth();
+    }
+
+    private boolean shouldStackByDbContentWidth() {
+        if (sourceDbSectionPanel == null || targetDbSectionPanel == null) {
+            return false;
+        }
+
+        int requiredWidth = sourceDbSectionPanel.getPreferredSize().width
+                + targetDbSectionPanel.getPreferredSize().width
+                + 12;
+
+        int availableWidth = dbConfigPanel != null && dbConfigPanel.getWidth() > 0
+                ? dbConfigPanel.getWidth()
+                : getContentPane().getWidth() - 20;
+
+        return availableWidth > 0 && requiredWidth > availableWidth;
+    }
+
+    private void applyResponsiveLayout(boolean portrait) {
+        if (portraitLayoutActive == portrait && dbConfigPanel.getComponentCount() > 0 && optionsContentPanel.getComponentCount() > 0) {
+            return;
+        }
+
+        portraitLayoutActive = portrait;
+
+        dbConfigPanel.removeAll();
+        if (portrait) {
+            dbConfigPanel.setLayout(new GridLayout(2, 1, 0, 10));
+        } else {
+            dbConfigPanel.setLayout(new GridLayout(1, 2, 12, 0));
+        }
+        dbConfigPanel.add(sourceDbSectionPanel);
+        dbConfigPanel.add(targetDbSectionPanel);
+
+        optionsContentPanel.removeAll();
+        if (portrait) {
+            optionsContentPanel.setLayout(new javax.swing.BoxLayout(optionsContentPanel, javax.swing.BoxLayout.Y_AXIS));
+            addSectionsVertically(
+                    optionsContentPanel,
+                    sectionModePanel,
+                    sectionCorePanel,
+                    sectionAdvancedPanel,
+                    sectionViewsPanel,
+                    sectionRetryPanel,
+                    sectionResumePanel
+            );
+        } else {
+            optionsContentPanel.setLayout(new GridLayout(1, 2, 12, 0));
+            optionsContentPanel.add(createOptionColumn(sectionModePanel, sectionAdvancedPanel, sectionRetryPanel));
+            optionsContentPanel.add(createOptionColumn(sectionCorePanel, sectionViewsPanel, sectionResumePanel));
+        }
+
+        dbConfigPanel.revalidate();
+        dbConfigPanel.repaint();
+        optionsContentPanel.revalidate();
+        optionsContentPanel.repaint();
+    }
+
+    private void addSectionsVertically(JPanel parent, JPanel... sections) {
+        for (int i = 0; i < sections.length; i++) {
+            JPanel section = sections[i];
+            lockSectionHeight(section);
+            section.setAlignmentX(Component.LEFT_ALIGNMENT);
+            parent.add(section);
+            if (i < sections.length - 1) {
+                parent.add(Box.createVerticalStrut(10));
+            }
+        }
+        parent.add(Box.createVerticalGlue());
     }
 
     private void bindOptionStateListeners() {
@@ -181,10 +343,10 @@ public class MigrationAppUI extends JFrame {
      */
     private JPanel createDbConfigPanel(String title, boolean isSource) {
         JPanel panel = new JPanel(new BorderLayout(5, 5));
-        panel.setBorder(BorderFactory.createTitledBorder(
-                BorderFactory.createEtchedBorder(), title, TitledBorder.LEFT, TitledBorder.TOP));
+        panel.setBorder(createDbSectionBorder(title));
 
         JComboBox<String> dbTypeCombo = new JComboBox<>(new String[]{"Oracle", "PostgreSQL"});
+        JTextField urlField = new JTextField();
         JTextField hostField = new JTextField(isSource ? "localhost" : "127.0.0.1");
         JTextField portField = new JTextField(isSource ? "1521" : "5432");
         JTextField dbNameField = new JTextField(isSource ? "ORCL" : "migration_db");
@@ -197,37 +359,50 @@ public class MigrationAppUI extends JFrame {
             sourcePortField = portField; sourceDbNameField = dbNameField;
             sourceUserField = userField; sourcePassField = passField;
             sourceSchemaField = schemaField;
+            sourceUrlField = urlField;
         } else {
             targetDbTypeCombo = dbTypeCombo; targetHostField = hostField;
             targetPortField = portField; targetDbNameField = dbNameField;
             targetUserField = userField; targetPassField = passField;
             targetSchemaField = schemaField;
+            targetUrlField = urlField;
         }
 
-        // Grid 7 rows: type, host, port, dbname, user, pass, schema
-        JPanel formPanel = new JPanel(new GridLayout(7, 1, 5, 5));
-        formPanel.setBorder(BorderFactory.createEmptyBorder(5, 5, 5, 5));
+        JPanel formPanel = new JPanel();
+        formPanel.setLayout(new javax.swing.BoxLayout(formPanel, javax.swing.BoxLayout.Y_AXIS));
+        formPanel.setBorder(BorderFactory.createEmptyBorder(2, 2, 2, 2));
 
         // Row: Database Type
         formPanel.add(makeLabeledRow("Database Type:", dbTypeCombo));
+        formPanel.add(Box.createVerticalStrut(6));
+
+        // Row: JDBC URL
+        urlField.setToolTipText("Uu tien su dung URL de ket noi. Neu de trong se dung Host + Port + DB Name / SID.");
+        formPanel.add(makeLabeledRow("JDBC URL (uu tien):", urlField));
+        formPanel.add(Box.createVerticalStrut(6));
 
         // Row: Host
         formPanel.add(makeLabeledRow("Host:", hostField));
+        formPanel.add(Box.createVerticalStrut(6));
 
         // Row: Port
         formPanel.add(makeLabeledRow("Port:", portField));
+        formPanel.add(Box.createVerticalStrut(6));
 
         // Row: DB Name / SID
         formPanel.add(makeLabeledRow("DB Name / SID:", dbNameField));
+        formPanel.add(Box.createVerticalStrut(6));
 
         // Row: Username
         formPanel.add(makeLabeledRow("Username:", userField));
+        formPanel.add(Box.createVerticalStrut(6));
 
         // Row: Password
         formPanel.add(makeLabeledRow("Password:", passField));
+        formPanel.add(Box.createVerticalStrut(6));
 
         // Row: Schema — đặt preferred width để field rộng, dễ nhập
-        schemaField.setPreferredSize(new Dimension(300, 22));
+        schemaField.setPreferredSize(new Dimension(300, 26));
         schemaField.setToolTipText("Bo trong = dung schema mac dinh (Oracle: username.uppercase, PG: public)");
         formPanel.add(makeLabeledRow("Schema (override):", schemaField));
 
@@ -235,9 +410,12 @@ public class MigrationAppUI extends JFrame {
 
         JButton btnTest = new JButton("Test Connection");
         btnTest.addActionListener(e -> testConnectionAction(isSource));
-        JPanel btnPanel = new JPanel(new FlowLayout(FlowLayout.RIGHT));
+        JPanel btnPanel = new JPanel();
+        btnPanel.setLayout(new javax.swing.BoxLayout(btnPanel, javax.swing.BoxLayout.X_AXIS));
         JComboBox<String> credentialCombo = new JComboBox<>();
         credentialCombo.setPrototypeDisplayValue("credential-name-xxxxxxxxxxxx");
+        credentialCombo.setPreferredSize(new Dimension(180, 28));
+        credentialCombo.setMaximumSize(new Dimension(220, 28));
         JButton btnLoadCredential = new JButton("Load Credential");
         JButton btnSaveCredential = new JButton("Save Credential");
 
@@ -250,10 +428,16 @@ public class MigrationAppUI extends JFrame {
         btnLoadCredential.addActionListener(e -> loadCredentialAction(isSource));
         btnSaveCredential.addActionListener(e -> saveCredentialAction(isSource));
 
-        btnPanel.add(new JLabel("Credential:"));
+        JLabel credentialLabel = new JLabel("Credential:");
+        credentialLabel.setFont(UI_FONT);
+        btnPanel.add(credentialLabel);
+        btnPanel.add(Box.createHorizontalStrut(6));
         btnPanel.add(credentialCombo);
+        btnPanel.add(Box.createHorizontalStrut(8));
         btnPanel.add(btnLoadCredential);
+        btnPanel.add(Box.createHorizontalStrut(6));
         btnPanel.add(btnSaveCredential);
+        btnPanel.add(Box.createHorizontalGlue());
         btnPanel.add(btnTest);
         panel.add(btnPanel, BorderLayout.SOUTH);
 
@@ -265,20 +449,22 @@ public class MigrationAppUI extends JFrame {
      */
     private JPanel createOptionsPanel() {
         JPanel wrapper = new JPanel(new BorderLayout(10, 8));
-        wrapper.setBorder(BorderFactory.createEmptyBorder(10, 10, 10, 10));
+        wrapper.setBorder(BorderFactory.createEmptyBorder(0, 0, 0, 0));
 
-        JPanel grid = new JPanel(new GridLayout(3, 2, 10, 10));
-        grid.add(createSection1ModePanel());
-        grid.add(createSection2CoreOptionsPanel());
-        grid.add(createSection3AdvancedPanel());
-        grid.add(createSection4ViewsPanel());
-        grid.add(createSection5RetryPanel());
-        grid.add(createSection6ResumePanel());
-        wrapper.add(grid, BorderLayout.CENTER);
+        sectionModePanel = createSection1ModePanel();
+        sectionCorePanel = createSection2CoreOptionsPanel();
+        sectionAdvancedPanel = createSection3AdvancedPanel();
+        sectionViewsPanel = createSection4ViewsPanel();
+        sectionRetryPanel = createSection5RetryPanel();
+        sectionResumePanel = createSection6ResumePanel();
+
+        optionsContentPanel = new JPanel();
+        optionsContentPanel.setOpaque(false);
+        wrapper.add(optionsContentPanel, BorderLayout.CENTER);
 
         JPanel notePanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 0, 2));
         JLabel note = new JLabel("Neu tien trinh bi treo hon 5 phut ma khong co log moi, vui long kiem tra ket noi DB.");
-        note.setFont(new Font("Arial", Font.ITALIC, 11));
+        note.setFont(new Font("Segoe UI", Font.ITALIC, 12));
         note.setForeground(new Color(120, 100, 80));
         notePanel.add(note);
         wrapper.add(notePanel, BorderLayout.SOUTH);
@@ -286,177 +472,335 @@ public class MigrationAppUI extends JFrame {
         return wrapper;
     }
 
+    private JPanel createOptionColumn(JPanel... sections) {
+        JPanel column = new JPanel();
+        column.setLayout(new javax.swing.BoxLayout(column, javax.swing.BoxLayout.Y_AXIS));
+
+        for (int i = 0; i < sections.length; i++) {
+            JPanel section = sections[i];
+            lockSectionHeight(section);
+            section.setAlignmentX(Component.LEFT_ALIGNMENT);
+            column.add(section);
+            if (i < sections.length - 1) {
+                column.add(Box.createVerticalStrut(10));
+            }
+        }
+
+        column.add(Box.createVerticalGlue());
+        return column;
+    }
+
     private JPanel createSection1ModePanel() {
         JPanel section = createOptionSection("1. CHE DO MIGRATION");
-        JPanel content = new JPanel(new GridLayout(3, 1, 4, 4));
+        JPanel content = createOptionContentPanel();
 
         optCopyAll = new JRadioButton("Copy cau truc va du lieu", true);
         optStructureOnly = new JRadioButton("Chi copy cau truc (DDL)");
         optDataOnly = new JRadioButton("Chi copy du lieu (DML)");
+        styleOptionToggle(optCopyAll);
+        styleOptionToggle(optStructureOnly);
+        styleOptionToggle(optDataOnly);
 
         ButtonGroup modeGroup = new ButtonGroup();
         modeGroup.add(optCopyAll);
         modeGroup.add(optStructureOnly);
         modeGroup.add(optDataOnly);
 
-        content.add(optCopyAll);
-        content.add(optStructureOnly);
-        content.add(optDataOnly);
-        section.add(content, BorderLayout.CENTER);
+        content.add(createSingleToggleRow(optCopyAll, 270));
+        content.add(Box.createVerticalStrut(8));
+        content.add(createSingleToggleRow(optStructureOnly, 270));
+        content.add(Box.createVerticalStrut(8));
+        content.add(createSingleToggleRow(optDataOnly, 270));
+        section.add(content, BorderLayout.NORTH);
         return section;
     }
 
     private JPanel createSection2CoreOptionsPanel() {
         JPanel section = createOptionSection("2. TUY CHON CO BAN");
-        JPanel content = new JPanel(new GridLayout(6, 1, 4, 4));
+        JPanel content = createOptionContentPanel();
 
         chkTruncateTarget = new JCheckBox("Xoa du lieu cu target truoc khi migrate (TRUNCATE)");
         chkCopyNewOnly = new JCheckBox("Chi copy ban ghi moi (theo PK — bo qua trung lap)");
         chkCopyOnlyTargetEmptyTables = new JCheckBox("Chi copy data cho cac bang target dang rong");
+        styleOptionToggle(chkTruncateTarget);
+        styleOptionToggle(chkCopyNewOnly);
+        styleOptionToggle(chkCopyOnlyTargetEmptyTables);
         content.add(chkTruncateTarget);
+        content.add(Box.createVerticalStrut(4));
         content.add(chkCopyNewOnly);
+        content.add(Box.createVerticalStrut(4));
         content.add(chkCopyOnlyTargetEmptyTables);
+        content.add(Box.createVerticalStrut(8));
 
-        JPanel row2 = new JPanel(new FlowLayout(FlowLayout.LEFT, 5, 0));
-        row2.add(new JLabel("Batch size (rows/batch):"));
+        JPanel row2 = createInlineRowPanel();
+        row2.add(makeOptionLabel("Batch size (rows/batch):"));
         batchSizeField = new JTextField("1000", 7);
         batchSizeField.setToolTipText("So dong migrate trong mot batch. Tang de toc do, giam de tranh tran bo nho.");
+        styleOptionField(batchSizeField);
         row2.add(batchSizeField);
-        row2.add(Box.createHorizontalStrut(20));
-        row2.add(new JLabel("Limit/bang (0 = tat ca):"));
+        row2.add(Box.createHorizontalStrut(14));
+        row2.add(makeOptionLabel("Limit/bang (0 = tat ca):"));
         limitDataField = new JTextField("0", 7);
         limitDataField.setToolTipText("Nhap 0 de copy toan bo dong.");
+        styleOptionField(limitDataField);
         row2.add(limitDataField);
-        row2.add(Box.createHorizontalStrut(20));
-        row2.add(new JLabel("Data threads (0 = auto):"));
+        row2.add(Box.createHorizontalStrut(14));
+        row2.add(makeOptionLabel("Data threads (0 = auto):"));
         dataThreadsField = new JTextField("0", 5);
         dataThreadsField.setToolTipText("So luong thread cho phase migrate data. 0 = tu dong theo pool/table.");
+        styleOptionField(dataThreadsField);
         row2.add(dataThreadsField);
         content.add(row2);
+        content.add(Box.createVerticalStrut(6));
 
-        JPanel includePanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 0, 2));
-        includePanel.add(new JLabel("Include bang (CSV):"));
         includeTablesField = new JTextField("", 28);
         includeTablesField.setToolTipText("Ho tro wildcard * (vi du: user*,order_*). Bo trong = migrate tat ca.");
-        includePanel.add(includeTablesField);
-        content.add(includePanel);
+        styleOptionField(includeTablesField);
+        includeTablesField.setPreferredSize(new Dimension(260, 26));
+        content.add(createLabeledStretchFieldRow("Include bang (CSV):", includeTablesField, 140));
+        content.add(Box.createVerticalStrut(6));
 
-        JPanel excludePanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 0, 2));
-        excludePanel.add(new JLabel("Exclude bang  (CSV):"));
         excludeTablesField = new JTextField("", 28);
         excludeTablesField.setToolTipText("Ho tro wildcard * (vi du: temp_*,audit*).");
-        excludePanel.add(excludeTablesField);
-        content.add(excludePanel);
+        styleOptionField(excludeTablesField);
+        excludeTablesField.setPreferredSize(new Dimension(260, 26));
+        content.add(createLabeledStretchFieldRow("Exclude bang (CSV):", excludeTablesField, 140));
 
-        section.add(content, BorderLayout.CENTER);
+        section.add(content, BorderLayout.NORTH);
         return section;
     }
 
     private JPanel createSection3AdvancedPanel() {
         JPanel section = createOptionSection("3. DOI TUONG NANG CAO");
-        JPanel content = new JPanel(new GridLayout(2, 1, 4, 4));
+        JPanel content = createOptionContentPanel();
 
         chkMigrateSequences = new JCheckBox("Sequences");
         chkMigrateIndexes   = new JCheckBox("Indexes");
         chkMigrateFunctions = new JCheckBox("Functions/Procedures");
         chkMigrateTriggers = new JCheckBox("Triggers");
+        styleOptionToggle(chkMigrateSequences);
+        styleOptionToggle(chkMigrateIndexes);
+        styleOptionToggle(chkMigrateFunctions);
+        styleOptionToggle(chkMigrateTriggers);
 
-        JPanel advRow1 = new JPanel(new FlowLayout(FlowLayout.LEFT, 5, 0));
-        advRow1.add(chkMigrateSequences);
-        advRow1.add(chkMigrateIndexes);
-        content.add(advRow1);
+        content.add(createTogglePairRow(chkMigrateSequences, chkMigrateIndexes, 190, 150));
 
-        JPanel advRow2 = new JPanel(new FlowLayout(FlowLayout.LEFT, 5, 0));
-        advRow2.add(chkMigrateFunctions);
-        advRow2.add(chkMigrateTriggers);
-        content.add(advRow2);
+        content.add(Box.createVerticalStrut(8));
 
-        section.add(content, BorderLayout.CENTER);
+        content.add(createTogglePairRow(chkMigrateFunctions, chkMigrateTriggers, 190, 150));
+
+        // Add spacing so section 3 height is closer to section 4 in two-column layout.
+        content.add(Box.createVerticalStrut(34));
+
+        section.add(content, BorderLayout.NORTH);
         return section;
     }
 
     private JPanel createSection4ViewsPanel() {
         JPanel section = createOptionSection("4. VIEWS");
-        JPanel content = new JPanel(new GridLayout(4, 1, 4, 4));
+        JPanel content = createOptionContentPanel();
 
         chkMigrateViews = new JCheckBox("Migrate views");
         chkReplaceExistingViews = new JCheckBox("Thay the views da ton tai (DROP + CREATE)");
+        styleOptionToggle(chkMigrateViews);
+        styleOptionToggle(chkReplaceExistingViews);
         content.add(chkMigrateViews);
+        content.add(Box.createVerticalStrut(4));
         content.add(chkReplaceExistingViews);
+        content.add(Box.createVerticalStrut(6));
 
-        JPanel includeViewsPanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 0, 2));
-        includeViewsPanel.add(new JLabel("  Include views (CSV):"));
+        JPanel includeViewsPanel = createInlineRowPanel();
+        includeViewsPanel.add(makeOptionLabel("Include views (CSV):"));
         includeViewsField = new JTextField("", 28);
         includeViewsField.setToolTipText("Ho tro wildcard * (vi du: v_user*,v_order_*).");
+        styleOptionField(includeViewsField);
+        includeViewsField.setPreferredSize(new Dimension(230, 26));
         includeViewsPanel.add(includeViewsField);
         content.add(includeViewsPanel);
+        content.add(Box.createVerticalStrut(6));
 
-        JPanel excludeViewsPanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 0, 2));
-        excludeViewsPanel.add(new JLabel("  Exclude views  (CSV):"));
+        JPanel excludeViewsPanel = createInlineRowPanel();
+        excludeViewsPanel.add(makeOptionLabel("Exclude views  (CSV):"));
         excludeViewsField = new JTextField("", 28);
         excludeViewsField.setToolTipText("Ho tro wildcard * (vi du: v_temp*).");
+        styleOptionField(excludeViewsField);
+        excludeViewsField.setPreferredSize(new Dimension(230, 26));
         excludeViewsPanel.add(excludeViewsField);
         content.add(excludeViewsPanel);
 
-        section.add(content, BorderLayout.CENTER);
+        section.add(content, BorderLayout.NORTH);
         return section;
     }
 
     private JPanel createSection5RetryPanel() {
         JPanel section = createOptionSection("5. RETRY / TU DONG THU LAI");
-        JPanel content = new JPanel(new GridLayout(2, 1, 4, 4));
+        JPanel content = createOptionContentPanel();
 
         chkRetryEnabled = new JCheckBox("Bat dau tinh nang retry khi gap loi tam thoi");
+        styleOptionToggle(chkRetryEnabled);
         content.add(chkRetryEnabled);
+        content.add(Box.createVerticalStrut(8));
 
-        JPanel retryRow1 = new JPanel(new FlowLayout(FlowLayout.LEFT, 5, 0));
-        retryRow1.add(new JLabel("So lan retry toi da:"));
+        JPanel retryRow1 = createInlineRowPanel();
+        retryRow1.add(makeOptionLabel("So lan retry toi da:"));
         retryMaxAttemptsField = new JTextField("3", 5);
+        styleOptionField(retryMaxAttemptsField);
         retryRow1.add(retryMaxAttemptsField);
         retryRow1.add(Box.createHorizontalStrut(10));
-        retryRow1.add(new JLabel("Delay ban dau (ms):"));
+        retryRow1.add(makeOptionLabel("Delay ban dau (ms):"));
         retryDelayMsField = new JTextField("2000", 7);
+        styleOptionField(retryDelayMsField);
         retryRow1.add(retryDelayMsField);
         retryRow1.add(Box.createHorizontalStrut(10));
-        retryRow1.add(new JLabel("Backoff multiplier:"));
+        retryRow1.add(makeOptionLabel("Backoff multiplier:"));
         retryBackoffField = new JTextField("2.0", 5);
+        styleOptionField(retryBackoffField);
         retryRow1.add(retryBackoffField);
         content.add(retryRow1);
 
-        section.add(content, BorderLayout.CENTER);
+        // Add spacing so section 5 height is closer to section 6 in two-column layout.
+        content.add(Box.createVerticalStrut(28));
+
+        section.add(content, BorderLayout.NORTH);
         return section;
     }
 
     private JPanel createSection6ResumePanel() {
         JPanel section = createOptionSection("6. RESUME / TIEP TUC TU DIEM DA DUNG");
-        JPanel content = new JPanel(new GridLayout(2, 1, 4, 4));
+        JPanel content = createOptionContentPanel();
 
         chkResumeEnabled = new JCheckBox("Bat dau tinh nang resume (tiep tuc tu diem da dung)");
+        styleOptionToggle(chkResumeEnabled);
         content.add(chkResumeEnabled);
+        content.add(Box.createVerticalStrut(8));
 
-        JPanel resumeRow1 = new JPanel(new FlowLayout(FlowLayout.LEFT, 5, 0));
-        resumeRow1.add(new JLabel("File checkpoint:"));
+        JPanel resumeRow1 = createInlineRowPanel();
+        resumeRow1.add(makeOptionLabel("File checkpoint:"));
         resumeStateFileField = new JTextField(".migration-resume.properties", 26);
         resumeStateFileField.setToolTipText("Duong dan tuyet doi hoac tuong doi toi file checkpoint.");
+        styleOptionField(resumeStateFileField);
+        resumeStateFileField.setPreferredSize(new Dimension(220, 26));
         resumeRow1.add(resumeStateFileField);
         this.chkResumeReset = new JCheckBox("Reset checkpoint cu?");
+        styleOptionToggle(this.chkResumeReset);
         resumeRow1.add(Box.createHorizontalStrut(10));
         resumeRow1.add(this.chkResumeReset);
         content.add(resumeRow1);
 
-        section.add(content, BorderLayout.CENTER);
+        section.add(content, BorderLayout.NORTH);
         return section;
+    }
+
+    private JPanel createOptionContentPanel() {
+        JPanel content = new JPanel();
+        content.setLayout(new javax.swing.BoxLayout(content, javax.swing.BoxLayout.Y_AXIS));
+        content.setOpaque(false);
+        return content;
+    }
+
+    private JPanel createInlineRowPanel() {
+        JPanel row = new JPanel(new FlowLayout(FlowLayout.LEFT, 6, 0));
+        row.setOpaque(false);
+        row.setAlignmentX(Component.LEFT_ALIGNMENT);
+        return row;
+    }
+
+    private JPanel createSingleToggleRow(AbstractButton toggle, int width) {
+        JPanel row = new JPanel();
+        row.setLayout(new javax.swing.BoxLayout(row, javax.swing.BoxLayout.X_AXIS));
+        row.setOpaque(false);
+        row.setAlignmentX(Component.LEFT_ALIGNMENT);
+        row.add(createToggleCell(toggle, width));
+        row.add(Box.createHorizontalGlue());
+        return row;
+    }
+
+    private JPanel createTogglePairRow(AbstractButton left, AbstractButton right, int leftWidth, int rightWidth) {
+        JPanel row = new JPanel();
+        row.setLayout(new javax.swing.BoxLayout(row, javax.swing.BoxLayout.X_AXIS));
+        row.setOpaque(false);
+        row.setAlignmentX(Component.LEFT_ALIGNMENT);
+        row.add(createToggleCell(left, leftWidth));
+        row.add(Box.createHorizontalStrut(16));
+        row.add(createToggleCell(right, rightWidth));
+        row.add(Box.createHorizontalGlue());
+        return row;
+    }
+
+    private JPanel createToggleCell(AbstractButton toggle, int width) {
+        JPanel cell = new JPanel(new BorderLayout());
+        cell.setOpaque(false);
+        cell.setPreferredSize(new Dimension(width, 26));
+        cell.setMinimumSize(new Dimension(width, 26));
+        cell.setMaximumSize(new Dimension(width, 26));
+        cell.add(toggle, BorderLayout.WEST);
+        return cell;
+    }
+
+    private JPanel createLabeledStretchFieldRow(String labelText, JTextField field, int labelWidth) {
+        JPanel row = new JPanel(new BorderLayout(8, 0));
+        row.setOpaque(false);
+        row.setAlignmentX(Component.LEFT_ALIGNMENT);
+
+        JLabel label = makeOptionLabel(labelText);
+        label.setPreferredSize(new Dimension(labelWidth, 26));
+        row.add(label, BorderLayout.WEST);
+        row.add(field, BorderLayout.CENTER);
+        return row;
+    }
+
+    private JLabel makeOptionLabel(String text) {
+        JLabel label = new JLabel(text);
+        label.setFont(UI_FONT);
+        return label;
+    }
+
+    private void styleOptionToggle(AbstractButton toggle) {
+        toggle.setFont(UI_FONT);
+        toggle.setFocusPainted(false);
+        toggle.setMargin(new Insets(2, 2, 2, 2));
+        toggle.setOpaque(false);
+        toggle.setAlignmentX(Component.LEFT_ALIGNMENT);
+    }
+
+    private void styleOptionField(JTextField field) {
+        field.setFont(UI_FONT);
+        Dimension preferred = field.getPreferredSize();
+        field.setPreferredSize(new Dimension(preferred.width, 26));
+    }
+
+    private void lockSectionHeight(JPanel section) {
+        Dimension preferred = section.getPreferredSize();
+        section.setMaximumSize(new Dimension(Integer.MAX_VALUE, preferred.height + 2));
     }
 
     private JPanel createOptionSection(String title) {
         JPanel section = new JPanel(new BorderLayout(5, 5));
-        section.setBorder(BorderFactory.createTitledBorder(
-                BorderFactory.createEtchedBorder(),
+        section.setBorder(createSectionBorder(title));
+        return section;
+    }
+
+    private javax.swing.border.Border createSectionBorder(String title) {
+        TitledBorder titledBorder = BorderFactory.createTitledBorder(
+                BorderFactory.createLineBorder(new Color(180, 180, 180)),
                 title,
                 TitledBorder.LEFT,
-                TitledBorder.TOP
-        ));
-        return section;
+                TitledBorder.TOP,
+                UI_TITLE_FONT
+        );
+        return BorderFactory.createCompoundBorder(titledBorder, BorderFactory.createEmptyBorder(6, 6, 6, 6));
+    }
+
+    private javax.swing.border.Border createDbSectionBorder(String title) {
+        TitledBorder titledBorder = BorderFactory.createTitledBorder(
+                BorderFactory.createLineBorder(new Color(78, 93, 108), 2),
+                title,
+                TitledBorder.LEFT,
+                TitledBorder.TOP,
+                UI_TITLE_FONT
+        );
+        titledBorder.setTitleColor(new Color(36, 49, 61));
+        return BorderFactory.createCompoundBorder(titledBorder, BorderFactory.createEmptyBorder(6, 6, 6, 6));
     }
 
     /** SwingUtilities.invokeLater wrapper */
@@ -621,12 +965,26 @@ public class MigrationAppUI extends JFrame {
                 : (String) targetDbTypeCombo.getSelectedItem();
 
         DatabaseType dbType = parseDatabaseType(selectedType);
-        String host = requireText(isSource ? sourceHostField : targetHostField, "Host");
-        int port = parsePort(isSource);
-        String dbName = requireText(isSource ? sourceDbNameField : targetDbNameField, "DB Name / SID");
+        JTextField jdbcUrlField = isSource ? sourceUrlField : targetUrlField;
+        String jdbcUrl = jdbcUrlField == null ? "" : jdbcUrlField.getText();
+
+        String host;
+        int port;
+        String dbName;
+        if (jdbcUrl != null && !jdbcUrl.trim().isEmpty()) {
+            host = optionalText(isSource ? sourceHostField : targetHostField);
+            port = parsePortOrDefault(isSource, defaultPortFor(dbType));
+            dbName = optionalText(isSource ? sourceDbNameField : targetDbNameField);
+        } else {
+            host = requireText(isSource ? sourceHostField : targetHostField, "Host");
+            port = parsePort(isSource);
+            dbName = requireText(isSource ? sourceDbNameField : targetDbNameField, "DB Name / SID");
+        }
+
         String username = requireText(isSource ? sourceUserField : targetUserField, "Username");
         String password = new String(isSource ? sourcePassField.getPassword() : targetPassField.getPassword());
         DatabaseConfig config = new DatabaseConfig(dbType, host, port, dbName, username, password);
+        config.setJdbcUrl(jdbcUrl == null ? null : jdbcUrl.trim());
         JTextField schemaField = isSource ? sourceSchemaField : targetSchemaField;
         if (schemaField != null) {
             String rawSchema = schemaField.getText();
@@ -637,11 +995,22 @@ public class MigrationAppUI extends JFrame {
         return config;
     }
 
-    /** Schema: dùng field override nếu filled, không thì default logic. */
+    /** Schema: uu tien schema param trong JDBC URL, sau do moi den field override/default. */
     private String parseSchema(JTextField schemaField, DatabaseConfig config) {
+        String jdbcUrl = config == null ? null : config.getJdbcUrlValue();
+        java.util.Optional<String> schemaFromUrl = config != null && config.getType() == DatabaseType.ORACLE
+                ? JdbcUrlParamResolver.resolveOracleSchemaFromUrl(jdbcUrl)
+                : JdbcUrlParamResolver.resolvePostgresSchemaFromUrl(jdbcUrl);
+        if (schemaFromUrl.isPresent()) {
+            return schemaFromUrl.get();
+        }
+
         String override = schemaField.getText();
         if (override != null && !override.trim().isBlank()) {
             return override.trim();
+        }
+        if (config == null) {
+            return "public";
         }
         // Default schema
         if (config.getType() == DatabaseType.ORACLE) {
@@ -662,6 +1031,13 @@ public class MigrationAppUI extends JFrame {
         return v.trim();
     }
 
+    private String optionalText(JTextField field) {
+        if (field == null || field.getText() == null) {
+            return "";
+        }
+        return field.getText().trim();
+    }
+
     private int parsePort(boolean isSource) {
         String raw = (isSource ? sourcePortField : targetPortField).getText();
         try {
@@ -669,6 +1045,22 @@ public class MigrationAppUI extends JFrame {
         } catch (NumberFormatException e) {
             throw new IllegalArgumentException("Port khong hop le: " + raw);
         }
+    }
+
+    private int parsePortOrDefault(boolean isSource, int defaultPort) {
+        String raw = (isSource ? sourcePortField : targetPortField).getText();
+        if (raw == null || raw.isBlank()) {
+            return defaultPort;
+        }
+        try {
+            return Integer.parseInt(raw.trim());
+        } catch (NumberFormatException e) {
+            return defaultPort;
+        }
+    }
+
+    private int defaultPortFor(DatabaseType type) {
+        return type == DatabaseType.ORACLE ? 1521 : 5432;
     }
 
     private Integer parseIntField(JTextField field, int defaultVal, String label) {
@@ -801,6 +1193,7 @@ public class MigrationAppUI extends JFrame {
         }
 
         JComboBox<String> typeCombo = isSource ? sourceDbTypeCombo : targetDbTypeCombo;
+        JTextField urlField = isSource ? sourceUrlField : targetUrlField;
         JTextField hostField = isSource ? sourceHostField : targetHostField;
         JTextField portField = isSource ? sourcePortField : targetPortField;
         JTextField dbNameField = isSource ? sourceDbNameField : targetDbNameField;
@@ -810,6 +1203,9 @@ public class MigrationAppUI extends JFrame {
 
         if (typeCombo != null) {
             typeCombo.setSelectedItem(config.getType() == DatabaseType.ORACLE ? "Oracle" : "PostgreSQL");
+        }
+        if (urlField != null) {
+            urlField.setText(config.getJdbcUrlValue() == null ? "" : config.getJdbcUrlValue());
         }
         if (hostField != null) {
             hostField.setText(config.getHost());
@@ -835,6 +1231,11 @@ public class MigrationAppUI extends JFrame {
         String role = isSource ? "source" : "target";
         String type = config.getType() == null ? "db" : config.getType().name().toLowerCase(Locale.ROOT);
         String host = config.getHost() == null || config.getHost().isBlank() ? "host" : config.getHost().trim();
+        if ((host == null || host.isBlank() || "host".equals(host))
+                && config.getJdbcUrlValue() != null
+                && !config.getJdbcUrlValue().isBlank()) {
+            host = "jdbc-url";
+        }
         String db = config.getDatabaseName() == null || config.getDatabaseName().isBlank()
                 ? "database"
                 : config.getDatabaseName().trim();
@@ -865,36 +1266,89 @@ public class MigrationAppUI extends JFrame {
     /** Bottom panel: progress bar + start button + log area. */
     private JPanel createBottomPanel() {
         JPanel panel = new JPanel(new BorderLayout(5, 5));
-        panel.setBorder(BorderFactory.createEmptyBorder(10, 10, 10, 10));
+        panel.setBorder(BorderFactory.createEmptyBorder(8, 10, 10, 10));
 
         // Top row: Start button + Progress bar
         JPanel topRow = new JPanel(new BorderLayout(5, 5));
-        btnStartMigration = new JButton("BAT DAU MIGRATION");
-        btnStartMigration.setFont(new Font("Arial", Font.BOLD, 15));
-        btnStartMigration.setBackground(new Color(30, 130, 80));
+        btnStartMigration = createPrimaryActionButton("BAT DAU MIGRATION");
         btnStartMigration.setForeground(Color.WHITE);
-        btnStartMigration.setPreferredSize(new Dimension(220, 48));
         btnStartMigration.addActionListener(e -> startMigrationAction());
         topRow.add(btnStartMigration, BorderLayout.WEST);
 
         progressBar = new JProgressBar(0, 100);
         progressBar.setStringPainted(true);
-        progressBar.setFont(new Font("Arial", Font.PLAIN, 12));
+        progressBar.setFont(new Font("Segoe UI", Font.PLAIN, 12));
+        progressBar.setPreferredSize(new Dimension(200, 32));
         topRow.add(progressBar, BorderLayout.CENTER);
 
         panel.add(topRow, BorderLayout.NORTH);
 
         // Log area
-        logArea = new JTextArea(10, 80);
+        logArea = new JTextArea(12, 80);
         logArea.setEditable(false);
         logArea.setFont(new Font("Consolas", Font.PLAIN, 12));
         logArea.setBackground(new Color(18, 18, 30));
         logArea.setForeground(new Color(200, 230, 160));
         JScrollPane scrollPane = new JScrollPane(logArea);
-        scrollPane.setBorder(BorderFactory.createTitledBorder("Execution Logs"));
+        scrollPane.setBorder(createSectionBorder("Execution Logs"));
         panel.add(scrollPane, BorderLayout.CENTER);
 
         return panel;
+    }
+
+    private JButton createPrimaryActionButton(String text) {
+        JButton button = new JButton(text) {
+            @Override
+            protected void paintComponent(Graphics g) {
+                Graphics2D g2 = (Graphics2D) g.create();
+                g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+
+                Color top;
+                Color bottom;
+                Color border;
+                if (!isEnabled()) {
+                    top = new Color(120, 120, 120);
+                    bottom = new Color(95, 95, 95);
+                    border = new Color(80, 80, 80);
+                } else if (getModel().isPressed()) {
+                    top = new Color(191, 59, 39);
+                    bottom = new Color(150, 39, 25);
+                    border = new Color(111, 24, 14);
+                } else if (getModel().isRollover()) {
+                    top = new Color(255, 122, 55);
+                    bottom = new Color(243, 93, 34);
+                    border = new Color(191, 67, 14);
+                } else {
+                    top = new Color(246, 103, 43);
+                    bottom = new Color(223, 72, 19);
+                    border = new Color(171, 52, 11);
+                }
+
+                g2.setColor(new Color(0, 0, 0, 35));
+                g2.fillRoundRect(2, 3, getWidth() - 4, getHeight() - 4, 12, 12);
+
+                g2.setPaint(new GradientPaint(0, 0, top, 0, getHeight(), bottom));
+                g2.fillRoundRect(0, 0, getWidth() - 3, getHeight() - 3, 12, 12);
+
+                g2.setColor(border);
+                g2.drawRoundRect(0, 0, getWidth() - 3, getHeight() - 3, 12, 12);
+                g2.dispose();
+
+                super.paintComponent(g);
+            }
+        };
+
+        button.setFont(new Font("Segoe UI", Font.BOLD, 15));
+        button.setHorizontalAlignment(JButton.CENTER);
+        button.setCursor(new Cursor(Cursor.HAND_CURSOR));
+        button.setFocusPainted(false);
+        button.setRolloverEnabled(true);
+        button.setBorderPainted(false);
+        button.setContentAreaFilled(false);
+        button.setOpaque(false);
+        button.setMargin(new Insets(8, 18, 8, 18));
+        button.setPreferredSize(new Dimension(240, 50));
+        return button;
     }
 
     /**
@@ -902,11 +1356,13 @@ public class MigrationAppUI extends JFrame {
      * Dùng GridLayout 2 cột (label 150px, field stretch).
      */
     private JPanel makeLabeledRow(String labelText, JComponent field) {
-        JPanel row = new JPanel(new GridLayout(1, 2, 8, 0));
+        JPanel row = new JPanel(new BorderLayout(8, 0));
         JLabel label = new JLabel(labelText);
-        label.setPreferredSize(new Dimension(150, 22));
-        row.add(label);
-        row.add(field);
+        label.setFont(UI_FONT);
+        label.setPreferredSize(new Dimension(150, 26));
+        field.setFont(UI_FONT);
+        row.add(label, BorderLayout.WEST);
+        row.add(field, BorderLayout.CENTER);
         return row;
     }
 

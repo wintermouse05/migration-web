@@ -1,1 +1,4 @@
 /ora2pg
+/migration-db-web/out
+/migration-db-web/dist
+/migration-db-web/target

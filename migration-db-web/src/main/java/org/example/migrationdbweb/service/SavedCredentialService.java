@@ -45,8 +45,8 @@ public class SavedCredentialService {
 
         String insertSql = """
                 INSERT INTO saved_database_credentials
-                    (display_name, db_type, host, port, database_name, schema_name, username, password)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    (display_name, db_type, jdbc_url, host, port, database_name, schema_name, username, password)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 RETURNING id, created_at
                 """;
 
@@ -55,12 +55,13 @@ public class SavedCredentialService {
 
             statement.setString(1, displayName.trim());
             statement.setString(2, config.getType().name());
-            statement.setString(3, config.getHost());
-            statement.setInt(4, config.getPort());
-            statement.setString(5, config.getDatabaseName());
-            statement.setString(6, config.getSchemaName());
-            statement.setString(7, config.getUsername());
-            statement.setString(8, config.getPassword());
+            statement.setString(3, config.getJdbcUrlValue());
+            statement.setString(4, config.getHost());
+            statement.setInt(5, config.getPort());
+            statement.setString(6, config.getDatabaseName());
+            statement.setString(7, config.getSchemaName());
+            statement.setString(8, config.getUsername());
+            statement.setString(9, config.getPassword());
 
             try (ResultSet rs = statement.executeQuery()) {
                 if (!rs.next()) {
@@ -84,7 +85,7 @@ public class SavedCredentialService {
         ensureStorageReady();
 
         String querySql = """
-            SELECT id, display_name, db_type, host, port, database_name, schema_name, username, password, created_at
+            SELECT id, display_name, db_type, jdbc_url, host, port, database_name, schema_name, username, password, created_at
                 FROM saved_database_credentials
                 ORDER BY created_at DESC, id DESC
                 """;
@@ -104,6 +105,7 @@ public class SavedCredentialService {
                         rs.getString("username"),
                         rs.getString("password")
                 );
+                config.setJdbcUrl(rs.getString("jdbc_url"));
                 config.setSchemaName(rs.getString("schema_name"));
 
                 Timestamp createdAt = rs.getTimestamp("created_at");
@@ -152,12 +154,18 @@ public class SavedCredentialService {
                 ADD COLUMN IF NOT EXISTS schema_name VARCHAR(255)
                 """;
 
+        String alterAddJdbcUrlColumnSql = """
+            ALTER TABLE saved_database_credentials
+            ADD COLUMN IF NOT EXISTS jdbc_url TEXT
+            """;
+
         try {
             Class.forName("org.postgresql.Driver");
             try (Connection connection = openConnection();
                  Statement statement = connection.createStatement()) {
                 statement.execute(ddl);
                 statement.execute(alterAddSchemaColumnSql);
+                statement.execute(alterAddJdbcUrlColumnSql);
             }
             storageInitialized = true;
         } catch (ClassNotFoundException e) {
@@ -239,15 +247,20 @@ public class SavedCredentialService {
         if (config.getType() == null) {
             throw new IllegalArgumentException("Loai database khong hop le.");
         }
-        if (config.getHost() == null || config.getHost().isBlank()) {
-            throw new IllegalArgumentException("Host khong duoc de trong.");
+
+        boolean hasJdbcUrl = config.getJdbcUrlValue() != null && !config.getJdbcUrlValue().isBlank();
+        if (!hasJdbcUrl) {
+            if (config.getHost() == null || config.getHost().isBlank()) {
+                throw new IllegalArgumentException("Host khong duoc de trong.");
+            }
+            if (config.getPort() <= 0) {
+                throw new IllegalArgumentException("Port phai lon hon 0.");
+            }
+            if (config.getDatabaseName() == null || config.getDatabaseName().isBlank()) {
+                throw new IllegalArgumentException("Ten database/SID khong duoc de trong.");
+            }
         }
-        if (config.getPort() <= 0) {
-            throw new IllegalArgumentException("Port phai lon hon 0.");
-        }
-        if (config.getDatabaseName() == null || config.getDatabaseName().isBlank()) {
-            throw new IllegalArgumentException("Ten database/SID khong duoc de trong.");
-        }
+
         if (config.getUsername() == null || config.getUsername().isBlank()) {
             throw new IllegalArgumentException("Username khong duoc de trong.");
         }
@@ -265,6 +278,7 @@ public class SavedCredentialService {
                 config.getUsername(),
                 config.getPassword()
         );
+        copied.setJdbcUrl(config.getJdbcUrlValue());
         copied.setSchemaName(config.getSchemaName());
         copied.setMaximumPoolSize(config.getMaximumPoolSize());
         return copied;

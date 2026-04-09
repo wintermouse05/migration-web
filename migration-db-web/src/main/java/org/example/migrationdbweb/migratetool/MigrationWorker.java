@@ -11,6 +11,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.TreeMap;
 import java.util.concurrent.CompletionService;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorCompletionService;
@@ -131,12 +132,12 @@ public class MigrationWorker extends SwingWorker<Void, String> {
 
         try {
             setProgress(0);
-            publish("Đang thiết lập kết nối tới cơ sềEdữ liệu...");
+            publish("Đang thiết lập kết nối tới cơ sở dữ liệu...");
             manager.createPool(sourcePoolId, sourceConfig);
             manager.createPool(targetPoolId, targetConfig);
 
             if (!manager.testConnection(sourcePoolId) || !manager.testConnection(targetPoolId)) {
-                throw new SQLException("Không thềEthiết lập kết nối tới Source/Target DB.");
+                throw new SQLException("Không thể thiết lập kết nối tới Source/Target DB.");
             }
 
             try (Connection sourceConn = manager.getConnection(sourcePoolId);
@@ -237,7 +238,7 @@ public class MigrationWorker extends SwingWorker<Void, String> {
                 totalTables = allTables.size();
 
                 if (totalTables == 0) {
-                    publish("Không còn bảng hợp lềEđềEmigrate sau khi đối chiếu tên bảng trên target.");
+                    publish("Không còn bảng hợp lệ để migrate sau khi đối chiếu tên bảng trên target.");
                     setProgress(100);
                     return null;
                 }
@@ -260,16 +261,16 @@ public class MigrationWorker extends SwingWorker<Void, String> {
                     }
                     setProgress(50);
                 } else {
-                    publish("BềEqua bước tạo cấu trúc do chọn chế đềEData Only.");
+                    publish("Bỏ qua bước tạo cấu trúc do chọn chế đềEData Only.");
                     setProgress(60);
                 }
 
                 if (!isStructureOnly) {
-                    publish("--- BẮT ĐẦU CHUYềE DỮ LIềE (DML) ---");
+                    publish("--- BẮT ĐẦU CHUYỂN DỮ LIỆU (DML) ---");
                     SqlGenerator sqlGenerator = new SqlGenerator(sourceDialect, targetDialect);
 
                     if (truncateTarget) {
-                        publish("--- TRUNCATE DỮ LIềE CŨ TRÊN TARGET ---");
+                        publish("--- TRUNCATE DỮ LIỆU CŨ TRÊN TARGET ---");
                         runTruncatePhase(targetConn, allTables, targetDialect);
                         if (checkpointStore != null) {
                             checkpointStore.clear();
@@ -306,7 +307,7 @@ public class MigrationWorker extends SwingWorker<Void, String> {
                         runCreateTriggersPhase(targetConn, allTriggers, sourceConfig.getType(), targetDialect);
                     }
                 } else {
-                    publish("BềEqua bước thêm khóa ngoại do chọn chế đềEData Only.");
+                    publish("Bỏ qua bước thêm khóa ngoại do chọn chế độ Data Only.");
                 }
 
                 // ── VIEWS: chỉ chạy nếu user chọn migrate views và KHONG o DATA_ONLY ──
@@ -322,9 +323,9 @@ public class MigrationWorker extends SwingWorker<Void, String> {
                             replaceExistingViews
                     );
                 } else if (migrateViews) {
-                    publish("Bo qua views do chon che do Data Only.");
+                    publish("Bỏ qua views do chọn chế độ Data Only.");
                 } else {
-                    publish("Bo qua views (khong chon migrate views).");
+                    publish("Bỏ qua views (không chọn migrate views).");
                 }
             }
 
@@ -356,7 +357,7 @@ public class MigrationWorker extends SwingWorker<Void, String> {
                     publish("  -> Đã tạo bảng " + table.getTableName());
                 } catch (SQLException e) {
                     if (isTableAlreadyExistsError(e)) {
-                        publish("  -> BềEqua bảng đã tồn tại: " + table.getTableName());
+                        publish("  -> Bỏ qua bảng đã tồn tại: " + table.getTableName());
                     } else {
                         throw e;
                     }
@@ -413,7 +414,7 @@ public class MigrationWorker extends SwingWorker<Void, String> {
                         statement.execute(normalizeSqlForJdbc(fkSql));
                     } catch (SQLException e) {
                         if (isConstraintAlreadyExistsError(e) || isIncompatibleForeignKeyError(e)) {
-                            publish("  -> BềEqua FK không thềEáp dụng cho bảng " + table.getTableName() + ": " + e.getMessage());
+                            publish("  -> Bỏ qua FK không thể áp dụng cho bảng " + table.getTableName() + ": " + e.getMessage());
                             continue;
                         }
                         throw e;
@@ -463,7 +464,7 @@ public class MigrationWorker extends SwingWorker<Void, String> {
                     }
 
                     if (isTableNotExistsError(e)) {
-                        publish("  -> BềEqua truncate vì bảng chưa tồn tại: " + table.getTableName());
+                        publish("  -> Bỏ qua truncate vì bảng chưa tồn tại: " + table.getTableName());
                         continue;
                     }
                     throw e;
@@ -500,7 +501,7 @@ public class MigrationWorker extends SwingWorker<Void, String> {
                         deletedAnyInThisPass = true;
                     } catch (SQLException e) {
                         if (isTableNotExistsError(e)) {
-                            publish("  -> BềEqua DELETE vì bảng chưa tồn tại: " + table.getTableName());
+                            publish("  -> Bỏ qua DELETE vì bảng chưa tồn tại: " + table.getTableName());
                             deletedAnyInThisPass = true;
                             continue;
                         }
@@ -525,7 +526,7 @@ public class MigrationWorker extends SwingWorker<Void, String> {
                         .reduce((a, b) -> a + ", " + b)
                         .orElse("unknown");
                 throw new SQLException(
-                        "Không thềEdọn dữ liệu cho các bảng Oracle do ràng buộc FK vòng lặp hoặc dữ liệu tham chiếu còn tồn tại: "
+                        "Không thể xóa dữ liệu cho các bảng Oracle do ràng buộc FK vòng lặp hoặc dữ liệu tham chiếu còn tồn tại: "
                                 + blockedTables
                 );
             }
@@ -669,104 +670,124 @@ public class MigrationWorker extends SwingWorker<Void, String> {
         int threadCount = resolveDataMigrationThreadCount(runnablePlans.size());
         publish("Data phase multithread: " + threadCount + " thread(s), " + runnablePlans.size() + " bang can migrate.");
 
-        ExecutorService executor = Executors.newFixedThreadPool(threadCount);
-        CompletionService<TableTransferOutcome> completionService = new ExecutorCompletionService<>(executor);
-        int submitted = 0;
-
+        Map<Integer, List<TableMigrationPlan>> plansByLevel = new TreeMap<>();
         for (TableMigrationPlan plan : runnablePlans) {
-            TableDefinition table = plan.table();
-            final String tableName = table.getTableName();
-            final int startOffset = checkpointStore == null ? 0 : checkpointStore.getTableOffset(tableName);
-            final boolean effectiveCopyNewOnly = copyNewOnly
-                    || (retryPolicy.isResumeEnabled() && !table.getPrimaryKeys().isEmpty());
-
-            if (startOffset > 0) {
-                publish("  -> Resume bang " + tableName + " tu offset " + startOffset + ".");
-            }
-
-            if (effectiveCopyNewOnly && table.getPrimaryKeys().isEmpty()) {
-                publish("  -> Bang " + tableName + " khong co PK, copyNewOnly khong the loc trung theo PK.");
-            }
-
-            completionService.submit(() -> {
-                if (isCancelled()) {
-                    return TableTransferOutcome.failed(tableName, "Tien trinh da bi huy.");
-                }
-
-                try {
-                    DataTransferService transferService = new DataTransferService(sqlGenerator, retryPolicy);
-                    publish("Dang sao chep du lieu bang " + tableName + " (rows=" + plan.rowCount() + ")...");
-
-                    DataTransferService.TransferResult result = transferTableWithRetry(
-                            manager,
-                            sourcePoolId,
-                            targetPoolId,
-                            transferService,
-                            table,
-                            effectiveCopyNewOnly,
-                            checkpointStore,
-                            startOffset
-                    );
-
-                    if (checkpointStore != null) {
-                        if (result.isLimitReached()) {
-                            checkpointStore.updateTableOffset(tableName, result.getTransferredRows());
-                        } else {
-                            checkpointStore.markTableCompleted(tableName, result.getTransferredRows());
-                        }
-                    }
-
-                    return TableTransferOutcome.success(
-                            tableName,
-                            result.getTransferredRows(),
-                            result.getSkippedRows(),
-                            result.isLimitReached()
-                    );
-                } catch (SQLException | RuntimeException ex) {
-                    return TableTransferOutcome.failed(tableName, ex.getMessage());
-                }
-            });
-
-            submitted++;
+            plansByLevel
+                .computeIfAbsent(plan.fkLevel(), ignored -> new ArrayList<>())
+                .add(plan);
         }
 
         SQLException firstFailure = null;
         int completed = 0;
+        int totalSubmitted = runnablePlans.size();
 
-        try {
-            for (int i = 0; i < submitted; i++) {
-                ensureNotCancelled();
-                Future<TableTransferOutcome> future = completionService.take();
-                TableTransferOutcome outcome = future.get();
+        for (Map.Entry<Integer, List<TableMigrationPlan>> levelEntry : plansByLevel.entrySet()) {
+            ensureNotCancelled();
 
-                if (!outcome.success()) {
-                    if (firstFailure == null) {
-                        firstFailure = new SQLException(
-                                "Khong the migrate bang " + outcome.tableName() + ": " + outcome.errorMessage()
-                        );
+            int fkLevel = levelEntry.getKey();
+            List<TableMigrationPlan> levelPlans = levelEntry.getValue();
+            int levelThreadCount = Math.max(1, Math.min(threadCount, levelPlans.size()));
+            publish("--- FK LEVEL " + fkLevel + ": " + levelPlans.size()
+                    + " bang, " + levelThreadCount + " thread(s) ---");
+
+            ExecutorService levelExecutor = Executors.newFixedThreadPool(levelThreadCount);
+            CompletionService<TableTransferOutcome> levelCompletionService =
+                    new ExecutorCompletionService<>(levelExecutor);
+
+            try {
+                for (TableMigrationPlan plan : levelPlans) {
+                    TableDefinition table = plan.table();
+                    final String tableName = table.getTableName();
+                    final int startOffset = checkpointStore == null ? 0 : checkpointStore.getTableOffset(tableName);
+                    final boolean effectiveCopyNewOnly = copyNewOnly
+                            || (retryPolicy.isResumeEnabled() && !table.getPrimaryKeys().isEmpty());
+
+                    if (startOffset > 0) {
+                        publish("  -> Resume bang " + tableName + " tu offset " + startOffset + ".");
                     }
-                    publish("  -> LOI bang " + outcome.tableName() + ": " + outcome.errorMessage());
-                } else {
-                    publish("  -> Hoan tat bang " + outcome.tableName()
-                            + " | copied=" + outcome.transferredRows()
-                            + " | skipped=" + outcome.skippedRows()
-                            + (outcome.limitReached() ? " | dat nguong limit" : ""));
+
+                    if (effectiveCopyNewOnly && table.getPrimaryKeys().isEmpty()) {
+                        publish("  -> Bang " + tableName + " khong co PK, copyNewOnly khong the loc trung theo PK.");
+                    }
+
+                    levelCompletionService.submit(() -> {
+                        if (isCancelled()) {
+                            return TableTransferOutcome.failed(tableName, "Tien trinh da bi huy.");
+                        }
+
+                        try {
+                            DataTransferService transferService = new DataTransferService(sqlGenerator, retryPolicy);
+                            publish("Dang sao chep du lieu bang " + tableName + " (rows=" + plan.rowCount() + ")...");
+
+                            DataTransferService.TransferResult result = transferTableWithRetry(
+                                    manager,
+                                    sourcePoolId,
+                                    targetPoolId,
+                                    transferService,
+                                    table,
+                                    effectiveCopyNewOnly,
+                                    checkpointStore,
+                                    startOffset
+                            );
+
+                            if (checkpointStore != null) {
+                                if (result.isLimitReached()) {
+                                    checkpointStore.updateTableOffset(tableName, result.getTransferredRows());
+                                } else {
+                                    checkpointStore.markTableCompleted(tableName, result.getTransferredRows());
+                                }
+                            }
+
+                            return TableTransferOutcome.success(
+                                    tableName,
+                                    result.getTransferredRows(),
+                                    result.getSkippedRows(),
+                                    result.isLimitReached()
+                            );
+                        } catch (SQLException | RuntimeException ex) {
+                            return TableTransferOutcome.failed(tableName, ex.getMessage());
+                        }
+                    });
                 }
 
-                completed++;
-                setProgress(60 + (int) ((completed * 30.0f) / Math.max(1, submitted)));
-            }
-        } catch (InterruptedException ex) {
-            Thread.currentThread().interrupt();
-            throw new SQLException("Bi ngat trong khi cho cac task migrate du lieu hoan tat.", ex);
-        } catch (ExecutionException ex) {
-            throw new SQLException("Task migrate du lieu gap loi thuc thi: " + ex.getMessage(), ex);
-        } finally {
-            executor.shutdownNow();
-            try {
-                executor.awaitTermination(10, TimeUnit.SECONDS);
+                for (int i = 0; i < levelPlans.size(); i++) {
+                    ensureNotCancelled();
+                    Future<TableTransferOutcome> future = levelCompletionService.take();
+                    TableTransferOutcome outcome = future.get();
+
+                    if (!outcome.success()) {
+                        if (firstFailure == null) {
+                            firstFailure = new SQLException(
+                                    "Khong the migrate bang " + outcome.tableName() + ": " + outcome.errorMessage()
+                            );
+                        }
+                        publish("  -> LOI bang " + outcome.tableName() + ": " + outcome.errorMessage());
+                    } else {
+                        publish("  -> Hoan tat bang " + outcome.tableName()
+                                + " | copied=" + outcome.transferredRows()
+                                + " | skipped=" + outcome.skippedRows()
+                                + (outcome.limitReached() ? " | dat nguong limit" : ""));
+                    }
+
+                    completed++;
+                    setProgress(60 + (int) ((completed * 30.0f) / Math.max(1, totalSubmitted)));
+                }
             } catch (InterruptedException ex) {
                 Thread.currentThread().interrupt();
+                throw new SQLException("Bi ngat trong khi cho cac task migrate du lieu hoan tat.", ex);
+            } catch (ExecutionException ex) {
+                throw new SQLException("Task migrate du lieu gap loi thuc thi: " + ex.getMessage(), ex);
+            } finally {
+                levelExecutor.shutdownNow();
+                try {
+                    levelExecutor.awaitTermination(10, TimeUnit.SECONDS);
+                } catch (InterruptedException ex) {
+                    Thread.currentThread().interrupt();
+                }
+            }
+
+            if (firstFailure != null) {
+                break;
             }
         }
 
@@ -952,7 +973,7 @@ public class MigrationWorker extends SwingWorker<Void, String> {
             }
         }
 
-        throw new SQLException("Không thềEhoàn tất migrate cho bảng " + table.getTableName());
+        throw new SQLException("Không thể hoàn tất migrate cho bảng " + table.getTableName());
     }
 
     private static boolean isRetryableException(SQLException e) {
@@ -995,7 +1016,7 @@ public class MigrationWorker extends SwingWorker<Void, String> {
             Thread.sleep(millis);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-            throw new RuntimeException("Tiến trình retry bềEgián đoạn.", e);
+            throw new RuntimeException("Tiến trình retry bị gián đoạn.", e);
         }
     }
 
@@ -1012,7 +1033,7 @@ public class MigrationWorker extends SwingWorker<Void, String> {
             String targetKey = table.getTableName().toUpperCase(Locale.ROOT);
             TableDefinition existing = uniqueTables.get(targetKey);
             if (existing != null) {
-                publish("  -> BềEqua bảng " + table.getTableName()
+                publish("  -> Bỏ qua bảng " + table.getTableName()
                         + " vì trùng tên vật lý trên Oracle với bảng "
                         + existing.getTableName() + " (" + targetKey + ").");
                 continue;
@@ -1038,6 +1059,10 @@ public class MigrationWorker extends SwingWorker<Void, String> {
             boolean createIfMissing
     ) throws SQLException {
         if (conn == null || config == null || config.getType() != DatabaseType.POSTGRESQL) {
+            return;
+        }
+
+        if (JdbcUrlParamResolver.hasExplicitPostgresSchemaParam(config.getJdbcUrlValue())) {
             return;
         }
 
@@ -1167,19 +1192,20 @@ public class MigrationWorker extends SwingWorker<Void, String> {
             List<String> tableNames
     ) throws SQLException {
         List<IndexDefinition> result = new ArrayList<>();
+        boolean sameEngineMigration = targetConfig != null && dbType == targetConfig.getType();
         for (String tableName : tableNames) {
             ensureNotCancelled();
             List<String> idxNames = extractor.getIndexNames(conn, schema, tableName);
             for (String idxName : idxNames) {
                 IndexDefinition idx = extractor.extractIndexDefinition(conn, schema, idxName, dbType);
-                if (idx != null && !idx.isSystemIndex() && idx.isMigratable()) {
+                if (idx != null && !idx.isSystemIndex() && (idx.isMigratable() || sameEngineMigration)) {
                     idx.setSourceSchema(schema);
                     idx.setTargetSchema(targetSchema);
                     result.add(idx);
                     publish("  -> Index: " + idxName + " tren bang " + tableName
                             + " (unique=" + idx.isUnique()
                             + ", type=" + idx.getIndexType() + ")");
-                } else if (idx != null && !idx.isMigratable()) {
+                } else if (idx != null && !idx.isMigratable() && !sameEngineMigration) {
                     publish("  -> Bo qua index " + idxName
                             + " (loai " + idx.getIndexType() + " khong ho tro migrate)");
                 }
@@ -1422,11 +1448,15 @@ public class MigrationWorker extends SwingWorker<Void, String> {
             return;
         }
 
+        List<String> failedIndexes = new ArrayList<>();
+
         try (Statement stmt = targetConn.createStatement()) {
             int total = indexes.size();
             for (int i = 0; i < total; i++) {
                 ensureNotCancelled();
                 IndexDefinition idx = indexes.get(i);
+                boolean failed = false;
+                String failureMessage = null;
                 List<String> stmts = targetDialect.buildCreateIndexSql(idx);
                 for (String idxSql : stmts) {
                     try {
@@ -1438,10 +1468,27 @@ public class MigrationWorker extends SwingWorker<Void, String> {
                         if (isIndexAlreadyExistsError(e)) {
                             publish("  -> Bo qua index da ton tai: " + idx.getIndexName());
                         } else {
-                            publish("  -> LOI tao index " + idx.getIndexName()
-                                    + ": " + e.getMessage());
+                            if (isUniqueIndexDataConflict(e)) {
+                                failureMessage = "Du lieu trung lap, khong tao duoc UNIQUE INDEX";
+                            } else {
+                                failureMessage = e.getMessage();
+                            }
+                            publish("  -> LOI tao index " + idx.getIndexName() + ": " + failureMessage);
+                            failed = true;
+                            break;
                         }
                     }
+                }
+
+                if (failed) {
+                    failedIndexes.add(idx.getIndexName() + " (" + idx.getTableName() + ") - " + failureMessage);
+                }
+            }
+
+            if (!failedIndexes.isEmpty()) {
+                publish("  -> [WARN] Co " + failedIndexes.size() + " index tao that bai (da tiep tuc migration):");
+                for (String failedIndex : failedIndexes) {
+                    publish("     - " + failedIndex);
                 }
             }
         }
@@ -1662,9 +1709,10 @@ public class MigrationWorker extends SwingWorker<Void, String> {
         if (e == null) return false;
         String sqlState = e.getSQLState();
         String message = e.getMessage() == null ? "" : e.getMessage().toLowerCase(Locale.ROOT);
-        return "42P07".equals(sqlState)
-                || message.contains("already exists")
-                || message.contains("trigger");
+        return "42710".equals(sqlState)
+            || "42P07".equals(sqlState)
+            || message.contains("ora-00955")
+            || (message.contains("already exists") && message.contains("trigger"));
     }
 
     private static boolean isIndexAlreadyExistsError(SQLException e) {
@@ -1672,10 +1720,21 @@ public class MigrationWorker extends SwingWorker<Void, String> {
         String sqlState = e.getSQLState();
         String message = e.getMessage() == null ? "" : e.getMessage().toLowerCase(Locale.ROOT);
         return "42P07".equals(sqlState)   // PostgreSQL
-                || message.contains("already exists")
-                || message.contains("duplicate key")
-                || message.contains("already indexed")
+            || "42710".equals(sqlState)
+            || message.contains("ora-00955")
+            || (message.contains("already exists")
+            && (message.contains("index") || message.contains("relation")))
                 || message.contains("ora-01408");
+    }
+
+    private static boolean isUniqueIndexDataConflict(SQLException e) {
+        if (e == null) return false;
+        String sqlState = e.getSQLState();
+        String message = e.getMessage() == null ? "" : e.getMessage().toLowerCase(Locale.ROOT);
+        return "23505".equals(sqlState)
+                || message.contains("ora-00001")
+                || message.contains("duplicate key")
+                || message.contains("could not create unique index");
     }
 
     private static boolean isViewAlreadyExistsError(SQLException e) {

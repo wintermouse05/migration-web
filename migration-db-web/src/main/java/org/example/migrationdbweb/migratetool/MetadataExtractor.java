@@ -740,6 +740,7 @@ public class MetadataExtractor {
                         String expr = parseExpressionFromPgIndexDef(indexDef);
                         String whereClause = parseWhereFromPgIndexDef(indexDef);
                         IndexDefinition.IndexType type = parseIndexTypeFromPgIndexDef(indexDef);
+                        String indexMethod = parseIndexMethodFromPgIndexDef(indexDef);
 
                         // System index nếu là PK index (pg_toast, v.v.)
                         boolean system = indexName.startsWith("pg_")
@@ -755,7 +756,7 @@ public class MetadataExtractor {
                                 .indexType(type)
                                 .expression(expr)
                                 .whereClause(whereClause)
-                                .indexTypeName(type.name())
+                                .indexTypeName(indexMethod)
                                 .sourceDialect(DatabaseType.POSTGRESQL)
                                 .sourceSchema(schema)
                                 .systemIndex(system)
@@ -798,6 +799,7 @@ public class MetadataExtractor {
                 String expr = parseExpressionFromPgIndexDef(indexDef);
                 String whereClause = parseWhereFromPgIndexDef(indexDef);
                 IndexDefinition.IndexType type = parseIndexTypeFromPgIndexDef(indexDef);
+                String indexMethod = parseIndexMethodFromPgIndexDef(indexDef);
 
                 boolean system = indexName.startsWith("pg_")
                         || indexName.startsWith("sql_")
@@ -812,7 +814,7 @@ public class MetadataExtractor {
                         .indexType(type)
                         .expression(expr)
                         .whereClause(whereClause)
-                        .indexTypeName(type.name())
+                        .indexTypeName(indexMethod)
                         .sourceDialect(DatabaseType.POSTGRESQL)
                         .sourceSchema(schema)
                         .systemIndex(system)
@@ -878,11 +880,6 @@ public class MetadataExtractor {
                 // Lấy index expression (cho function-based index)
                 String expression = null;
                 String whereClause = null;
-                String exprSql = """
-                    SELECT COLUMN_EXPRESSION
-                    FROM USER_USED_PARTITIONS
-                    WHERE INDEX_NAME = UPPER(?) AND TABLE_NAME = UPPER(?)
-                    """;
                 // Function-based index: expression nằm trong USER_EXpressions hoặc phân tích index_type
                 if ("FUNCTION-BASED NORMAL".equals(idxType) || idxType != null && idxType.contains("FUNCTION")) {
                     // Try to get expression from a different approach
@@ -913,7 +910,7 @@ public class MetadataExtractor {
                         .tablespace(tablespace)
                         .expression(expression)
                         .whereClause(whereClause)
-                        .indexTypeName(idxType)
+                        .indexTypeName(buildOracleIndexTypeName(idxType, itypName))
                         .sourceDialect(DatabaseType.ORACLE)
                         .sourceSchema(schema)
                         .systemIndex(system)
@@ -922,24 +919,64 @@ public class MetadataExtractor {
         }
     }
 
+    private String buildOracleIndexTypeName(String idxType, String itypName) {
+        if (idxType == null || idxType.isBlank()) {
+            return null;
+        }
+        if (idxType.toUpperCase(Locale.ROOT).contains("DOMAIN")
+                && itypName != null && !itypName.isBlank()) {
+            return "DOMAIN:" + itypName;
+        }
+        return idxType;
+    }
+
     private String extractFunctionBasedIndexExpression(
             Connection conn, String indexName
     ) throws SQLException {
-        // Oracle function-based index: lấy expression từ USER_EXpressions
+        // Oracle function-based index: lấy expression từ USER_IND_EXPRESSIONS.
         String sql = """
             SELECT COLUMN_EXPRESSION
-            FROM USER_EXPRESSIONS
+            FROM USER_IND_EXPRESSIONS
             WHERE INDEX_NAME = UPPER(?)
+            ORDER BY COLUMN_POSITION
             """;
         try (PreparedStatement ps = conn.prepareStatement(sql)) {
             ps.setString(1, indexName);
             try (ResultSet rs = ps.executeQuery()) {
-                if (rs.next()) {
-                    return rs.getString("COLUMN_EXPRESSION");
+                List<String> expressions = new ArrayList<>();
+                while (rs.next()) {
+                    String expr = rs.getString("COLUMN_EXPRESSION");
+                    if (expr != null && !expr.isBlank()) {
+                        expressions.add(expr.trim());
+                    }
                 }
+                if (expressions.isEmpty()) return null;
+                if (expressions.size() == 1) return expressions.get(0);
+                return String.join(", ", expressions);
             }
         }
-        return null;
+    }
+
+    private String parseIndexMethodFromPgIndexDef(String indexDef) {
+        if (indexDef == null) return "BTREE";
+        String upper = indexDef.toUpperCase(Locale.ROOT);
+        int usingPos = upper.indexOf(" USING ");
+        if (usingPos < 0) {
+            return "BTREE";
+        }
+        int start = usingPos + " USING ".length();
+        int end = start;
+        while (end < upper.length()) {
+            char ch = upper.charAt(end);
+            if (!Character.isLetter(ch)) {
+                break;
+            }
+            end++;
+        }
+        if (end <= start) {
+            return "BTREE";
+        }
+        return upper.substring(start, end);
     }
 
     private List<String> parseColumnsFromPgIndexDef(String indexDef) {
@@ -1060,7 +1097,6 @@ public class MetadataExtractor {
             String sql = """
                 SELECT TRIGGER_NAME
                 FROM USER_TRIGGERS
-                WHERE STATUS = 'ENABLED'
                 ORDER BY TRIGGER_NAME
                 """;
             try (Statement st = conn.createStatement();
@@ -1116,6 +1152,7 @@ public class MetadataExtractor {
                     ELSE 'UNKNOWN'
                 END AS events,
                 t.tgattr,
+                t.tgenabled,
                 CASE WHEN (t.tgtype & 32) = 32 THEN 'INSTEAD OF' ELSE 'STANDARD' END AS timing2
             FROM pg_trigger t
             JOIN pg_proc p ON t.tgfoid = p.oid
@@ -1140,6 +1177,7 @@ public class MetadataExtractor {
                     // ngược lại timing lấy từ BEFORE/AFTER
                     String timing2 = rs.getString("timing2");
                     String events = rs.getString("events");
+                    String triggerEnabledState = rs.getString("tgenabled");
 
                     TriggerDefinition.TriggerTiming triggerTiming =
                             "INSTEAD OF".equalsIgnoreCase(timing2)
@@ -1159,7 +1197,7 @@ public class MetadataExtractor {
                             .triggerBody(functionBody)
                             .functionName(functionName)
                             .functionDdl(functionDdl)
-                            .enabled(true)
+                            .enabled(!"D".equalsIgnoreCase(triggerEnabledState))
                             .sourceSchema(schema)
                             .ddlText(triggerDdl)
                             .build();
@@ -1186,7 +1224,6 @@ public class MetadataExtractor {
                 REFERENCING_NAMES
             FROM USER_TRIGGERS
             WHERE TRIGGER_NAME = UPPER(?)
-              AND STATUS = 'ENABLED'
             """;
         try (PreparedStatement ps = conn.prepareStatement(sql)) {
             ps.setString(1, triggerName);
@@ -1270,7 +1307,7 @@ public class MetadataExtractor {
             String sql = """
                 SELECT TRIGGER_NAME
                 FROM USER_TRIGGERS
-                WHERE TABLE_NAME = UPPER(?) AND STATUS = 'ENABLED'
+                WHERE TABLE_NAME = UPPER(?)
                 ORDER BY TRIGGER_NAME
                 """;
             try (PreparedStatement ps = conn.prepareStatement(sql)) {

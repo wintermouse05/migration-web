@@ -2,6 +2,7 @@ package org.example.migrationdbweb.migratetool;
 
 public class DatabaseConfig {
     private DatabaseType type;
+    private String jdbcUrl;
     private String host;
     private int port;
     private String databaseName;
@@ -21,6 +22,10 @@ public class DatabaseConfig {
     }
 
     public String getJdbcUrl() {
+        if (jdbcUrl != null && !jdbcUrl.isBlank()) {
+            return jdbcUrl.trim();
+        }
+
         switch (type) {
             case POSTGRESQL:
                 return String.format("jdbc:postgresql://%s:%d/%s", host, port, databaseName);
@@ -58,6 +63,8 @@ public class DatabaseConfig {
 
     public DatabaseType getType() {return type;}
     public void setType(DatabaseType type) {this.type = type;}
+    public String getJdbcUrlValue() {return jdbcUrl;}
+    public void setJdbcUrl(String jdbcUrl) {this.jdbcUrl = jdbcUrl;}
     public String getHost() {return host;}
     public void setHost(String host) {this.host = host;}
     public int getPort() {return port;}

@@ -136,6 +136,7 @@ public abstract class DirectionalMigration {
                 // ── Extract Indexes ────────────────────────────────────────
                 if (MIGRATION_MIGRATE_INDEXES) {
                     System.out.println("Dang trích xuất INDEXES...");
+                    boolean sameEngineMigration = sourceConfig.getType() == targetConfig.getType();
                     Set<String> tableNamesSet = new LinkedHashSet<>();
                     for (TableDefinition t : allTables) tableNamesSet.add(t.getTableName());
                     for (String tn : tableNamesSet) {
@@ -143,7 +144,7 @@ public abstract class DirectionalMigration {
                         for (String in : idxNames) {
                             IndexDefinition idx = metadataExtractor.extractIndexDefinition(
                                     sourceConn, sourceSchema, in, sourceConfig.getType());
-                            if (idx != null && !idx.isSystemIndex() && idx.isMigratable()) {
+                            if (idx != null && !idx.isSystemIndex() && (idx.isMigratable() || sameEngineMigration)) {
                                 idx.setSourceSchema(sourceSchema);
                                 idx.setTargetSchema(targetSchema);
                                 allIndexes.add(idx);
@@ -643,8 +644,11 @@ public abstract class DirectionalMigration {
             // ── PHASE 5: Create Indexes ──────────────────────────────
             if (!allIndexes.isEmpty()) {
                 System.out.println("\n--- PHASE 5: CREATING INDEXES ---");
+                List<String> failedIndexes = new ArrayList<>();
                 try (Statement st = targetConn.createStatement()) {
                     for (IndexDefinition idx : allIndexes) {
+                        boolean failed = false;
+                        String failureMessage = null;
                         List<String> idxSqls = targetDialect.buildCreateIndexSql(idx);
                         for (String idxSql : idxSqls) {
                             if (idxSql == null || idxSql.isBlank()) continue;
@@ -652,9 +656,25 @@ public abstract class DirectionalMigration {
                                 st.execute(normalizeSqlForJdbc(idxSql));
                                 System.out.println("Created index: " + idx.getIndexName());
                             } catch (SQLException e) {
-                                System.err.println("Loi tao index " + idx.getIndexName() + ": " + e.getMessage());
+                                if (isUniqueIndexDataConflict(e)) {
+                                    failureMessage = "Du lieu trung lap, khong tao duoc UNIQUE INDEX";
+                                } else {
+                                    failureMessage = e.getMessage();
+                                }
+                                System.err.println("Loi tao index " + idx.getIndexName() + ": " + failureMessage);
+                                failed = true;
+                                break;
                             }
                         }
+                        if (failed) {
+                            failedIndexes.add(idx.getIndexName() + " (" + idx.getTableName() + ") - " + failureMessage);
+                        }
+                    }
+                }
+                if (!failedIndexes.isEmpty()) {
+                    System.err.println("[WARN] Co " + failedIndexes.size() + " index tao that bai (da tiep tuc migration):");
+                    for (String failedIndex : failedIndexes) {
+                        System.err.println("  - " + failedIndex);
                     }
                 }
             }
@@ -1090,6 +1110,15 @@ public abstract class DirectionalMigration {
         return "42804".equals(sqlState)
                 || message.contains("ora-02267")
                 || (message.contains("foreign key") && message.contains("incompatible"));
+    }
+
+    private static boolean isUniqueIndexDataConflict(SQLException e) {
+        String sqlState = e.getSQLState();
+        String message = e.getMessage() == null ? "" : e.getMessage().toLowerCase(Locale.ROOT);
+        return "23505".equals(sqlState)
+                || message.contains("ora-00001")
+                || message.contains("duplicate key")
+                || message.contains("could not create unique index");
     }
 
     protected static String getEnv(String name, String defaultValue) {

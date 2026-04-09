@@ -160,15 +160,13 @@ public class OracleDialect implements SqlDialect {
         List<String> stmts = new ArrayList<>();
         StringBuilder sb = new StringBuilder();
 
-        // Oracle BITMAP index được migrate nhưng PostgreSQL không có BITMAP
-        // → Vẫn tạo trên Oracle→Oracle, nhưng báo warning cho Oracle→PostgreSQL
-        if (!idx.isMigratable() && idx.getIndexType() == IndexDefinition.IndexType.BITMAP) {
-            // BITMAP index — Oracle only, migrate bằng cách tạo thành B-Tree
-            System.err.println("WARN: BITMAP index " + idx.getIndexName()
-                    + " cannot be migrated to PostgreSQL. Converting to B-Tree.");
+        if (idx.getIndexType() == IndexDefinition.IndexType.BITMAP) {
+            sb.append("CREATE BITMAP INDEX ");
+        } else if (idx.getIndexType() == IndexDefinition.IndexType.DOMAIN) {
+            sb.append("CREATE INDEX ");
+        } else {
+            sb.append(idx.isUnique() ? "CREATE UNIQUE INDEX " : "CREATE INDEX ");
         }
-
-        sb.append(idx.isUnique() ? "CREATE UNIQUE INDEX " : "CREATE INDEX ");
         if (idx.getIndexName() != null) {
             sb.append(quoteIdentifier(idx.getIndexName())).append(" ");
         }
@@ -184,8 +182,25 @@ public class OracleDialect implements SqlDialect {
             sb.append(" TABLESPACE ").append(idx.getTablespace());
         }
 
+        String domainType = resolveOracleDomainIndexType(idx.getIndexTypeName());
+        if (domainType != null) {
+            sb.append(" INDEXTYPE IS ").append(domainType);
+        }
+
         stmts.add(sb.toString());
         return stmts;
+    }
+
+    private String resolveOracleDomainIndexType(String indexTypeName) {
+        if (indexTypeName == null || indexTypeName.isBlank()) {
+            return null;
+        }
+        String normalized = indexTypeName.trim();
+        if (!normalized.toUpperCase(Locale.ROOT).startsWith("DOMAIN:")) {
+            return null;
+        }
+        String domainType = normalized.substring("DOMAIN:".length()).trim();
+        return domainType.isBlank() ? null : domainType;
     }
 
     private void appendIndexColumns(StringBuilder sb, IndexDefinition idx) {
@@ -240,7 +255,19 @@ public class OracleDialect implements SqlDialect {
         }
 
         stmts.add(ddl);
+        if (!trig.isEnabled()) {
+            stmts.add(buildDisableTriggerSql(trig));
+        }
         return stmts;
+    }
+
+    private String buildDisableTriggerSql(TriggerDefinition trig) {
+        String triggerName = quoteIdentifier(trig.getTriggerName());
+        String targetSchema = trig.getTargetSchema();
+        if (targetSchema != null && !targetSchema.isBlank()) {
+            triggerName = quoteIdentifier(targetSchema) + "." + triggerName;
+        }
+        return "ALTER TRIGGER " + triggerName + " DISABLE";
     }
 
     /**

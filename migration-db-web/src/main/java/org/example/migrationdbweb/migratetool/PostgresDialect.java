@@ -210,6 +210,7 @@ public class PostgresDialect implements SqlDialect {
                 sb.append(quoteIdentifier(idx.getIndexName())).append(" ");
             }
             sb.append("ON ").append(quoteIdentifier(idx.getTableName()));
+            appendIndexUsingClause(sb, idx);
             appendIndexColumns(sb, idx);
             sb.append(" WHERE ").append(idx.getWhereClause());
             stmts.add(sb.toString());
@@ -223,6 +224,7 @@ public class PostgresDialect implements SqlDialect {
                 sb.append(quoteIdentifier(idx.getIndexName())).append(" ");
             }
             sb.append("ON ").append(quoteIdentifier(idx.getTableName()));
+            appendIndexUsingClause(sb, idx);
             if (idx.getExpression() != null) {
                 sb.append(" (").append(idx.getExpression()).append(")");
             }
@@ -236,9 +238,46 @@ public class PostgresDialect implements SqlDialect {
             sb.append(quoteIdentifier(idx.getIndexName())).append(" ");
         }
         sb.append("ON ").append(quoteIdentifier(idx.getTableName()));
+        appendIndexUsingClause(sb, idx);
         appendIndexColumns(sb, idx);
         stmts.add(sb.toString());
         return stmts;
+    }
+
+    private void appendIndexUsingClause(StringBuilder sb, IndexDefinition idx) {
+        String method = resolveIndexMethod(idx);
+        if (method == null || method.isBlank() || "BTREE".equalsIgnoreCase(method)) {
+            return;
+        }
+        sb.append(" USING ").append(method.toLowerCase(Locale.ROOT));
+    }
+
+    private String resolveIndexMethod(IndexDefinition idx) {
+        if (idx.getIndexTypeName() != null && !idx.getIndexTypeName().isBlank()) {
+            String normalized = idx.getIndexTypeName().trim().toUpperCase(Locale.ROOT);
+            if (normalized.equals("BTREE")
+                    || normalized.equals("HASH")
+                    || normalized.equals("GIN")
+                    || normalized.equals("GIST")
+                    || normalized.equals("BRIN")) {
+                return normalized;
+            }
+        }
+        if (idx.getIndexType() == null) {
+            return "BTREE";
+        }
+        switch (idx.getIndexType()) {
+            case HASH:
+                return "HASH";
+            case GIN:
+                return "GIN";
+            case GIST:
+                return "GIST";
+            case BRIN:
+                return "BRIN";
+            default:
+                return "BTREE";
+        }
     }
 
     private void appendIndexColumns(StringBuilder sb, IndexDefinition idx) {
@@ -275,6 +314,9 @@ public class PostgresDialect implements SqlDialect {
             String triggerDdl = remapSchemaPrefix(trig.getDdlText(), trig.getSourceSchema(), trig.getTargetSchema());
             stmts.add(functionDdl.trim());
             stmts.add(triggerDdl.trim());
+            if (!trig.isEnabled()) {
+                stmts.add(buildDisableTriggerSql(trig));
+            }
             return stmts;
         }
 
@@ -348,7 +390,20 @@ public class PostgresDialect implements SqlDialect {
         trigStmt.append(" EXECUTE FUNCTION ").append(quoteIdentifier(functionName)).append("();");
 
         stmts.add(trigStmt.toString());
+        if (!trig.isEnabled()) {
+            stmts.add(buildDisableTriggerSql(trig));
+        }
         return stmts;
+    }
+
+    private String buildDisableTriggerSql(TriggerDefinition trig) {
+        String tableName = quoteIdentifier(trig.getTableName());
+        String targetSchema = trig.getTargetSchema();
+        if (targetSchema != null && !targetSchema.isBlank()) {
+            tableName = quoteIdentifier(targetSchema) + "." + tableName;
+        }
+        return "ALTER TABLE " + tableName + " DISABLE TRIGGER "
+                + quoteIdentifier(trig.getTriggerName()) + ";";
     }
 
     // ─── FUNCTION / PROCEDURE DDL ──────────────────────────────

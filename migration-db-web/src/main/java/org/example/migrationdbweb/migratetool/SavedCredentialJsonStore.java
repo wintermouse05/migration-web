@@ -17,6 +17,7 @@ public class SavedCredentialJsonStore {
     public record SavedDbCredential(
             String name,
             String dbType,
+            String jdbcUrl,
             String host,
             int port,
             String databaseName,
@@ -29,6 +30,7 @@ public class SavedCredentialJsonStore {
         public DatabaseConfig config() {
             DatabaseType type = DatabaseType.valueOf(dbType);
             DatabaseConfig config = new DatabaseConfig(type, host, port, databaseName, username, password);
+            config.setJdbcUrl(jdbcUrl);
             config.setSchemaName(schemaName);
             config.setMaximumPoolSize(maximumPoolSize <= 0 ? 10 : maximumPoolSize);
             return config;
@@ -38,6 +40,7 @@ public class SavedCredentialJsonStore {
             return new SavedDbCredential(
                     name,
                     config.getType().name(),
+                    config.getJdbcUrlValue(),
                     config.getHost(),
                     config.getPort(),
                     config.getDatabaseName(),

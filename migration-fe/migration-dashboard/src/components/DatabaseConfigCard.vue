@@ -66,6 +66,16 @@
       </label>
 
       <label class="field">
+        <span>JDBC URL (uu tien)</span>
+        <input
+          v-model.trim="localConfig.jdbcUrl"
+          type="text"
+          placeholder="jdbc:postgresql://localhost:5432/migration_db"
+        />
+        <small class="field-note">Neu co URL, he thong se uu tien dung URL thay vi Host/Port/DB Name.</small>
+      </label>
+
+      <label class="field">
         <span>Host</span>
         <input v-model.trim="localConfig.host" type="text" placeholder="localhost" />
       </label>
@@ -206,7 +216,7 @@ const renderSavedCredentialOption = (credential) => {
   const name = credential.displayName || 'Credential';
   const cfg = credential.databaseConfig || {};
   const type = cfg.type || 'DB';
-  const host = cfg.host || 'unknown-host';
+  const host = cfg.host || (cfg.jdbcUrl ? 'jdbc-url' : 'unknown-host');
   const dbName = cfg.databaseName || 'unknown-db';
   return `${name} (${type} - ${host}/${dbName})`;
 };
@@ -351,6 +361,12 @@ const renderSavedCredentialOption = (credential) => {
   color: #415665;
   font-size: 0.84rem;
   font-weight: 700;
+}
+
+.field-note {
+  color: #6e7d89;
+  font-size: 0.76rem;
+  line-height: 1.35;
 }
 
 .field input,
