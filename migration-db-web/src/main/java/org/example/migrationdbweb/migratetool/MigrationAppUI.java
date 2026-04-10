@@ -132,8 +132,8 @@ public class MigrationAppUI extends JFrame {
 
         dbConfigPanel = new JPanel();
         dbConfigPanel.setAlignmentX(Component.LEFT_ALIGNMENT);
-        sourceDbSectionPanel = createDbConfigPanel("Source Database (Nguồn)", true);
-        targetDbSectionPanel = createDbConfigPanel("Target Database (Đích)", false);
+        sourceDbSectionPanel = createDbConfigPanel("Source Database", true);
+        targetDbSectionPanel = createDbConfigPanel("Target Database", false);
         mainContent.add(dbConfigPanel);
         mainContent.add(Box.createVerticalStrut(10));
 
@@ -377,8 +377,8 @@ public class MigrationAppUI extends JFrame {
         formPanel.add(Box.createVerticalStrut(6));
 
         // Row: JDBC URL
-        urlField.setToolTipText("Uu tien su dung URL de ket noi. Neu de trong se dung Host + Port + DB Name / SID.");
-        formPanel.add(makeLabeledRow("JDBC URL (uu tien):", urlField));
+        urlField.setToolTipText("Preferred connection mode. If empty, Host + Port + DB Name / SID will be used.");
+        formPanel.add(makeLabeledRow("JDBC URL (preferred):", urlField));
         formPanel.add(Box.createVerticalStrut(6));
 
         // Row: Host
@@ -403,7 +403,7 @@ public class MigrationAppUI extends JFrame {
 
         // Row: Schema — đặt preferred width để field rộng, dễ nhập
         schemaField.setPreferredSize(new Dimension(300, 26));
-        schemaField.setToolTipText("Bo trong = dung schema mac dinh (Oracle: username.uppercase, PG: public)");
+        schemaField.setToolTipText("Leave blank to use default schema (Oracle: USERNAME uppercase, PostgreSQL: public)");
         formPanel.add(makeLabeledRow("Schema (override):", schemaField));
 
         panel.add(formPanel, BorderLayout.CENTER);
@@ -463,7 +463,7 @@ public class MigrationAppUI extends JFrame {
         wrapper.add(optionsContentPanel, BorderLayout.CENTER);
 
         JPanel notePanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 0, 2));
-        JLabel note = new JLabel("Neu tien trinh bi treo hon 5 phut ma khong co log moi, vui long kiem tra ket noi DB.");
+        JLabel note = new JLabel("If no new logs appear for over 5 minutes, please verify database connectivity.");
         note.setFont(new Font("Segoe UI", Font.ITALIC, 12));
         note.setForeground(new Color(120, 100, 80));
         notePanel.add(note);
@@ -491,12 +491,12 @@ public class MigrationAppUI extends JFrame {
     }
 
     private JPanel createSection1ModePanel() {
-        JPanel section = createOptionSection("1. CHE DO MIGRATION");
+        JPanel section = createOptionSection("1. MIGRATION MODE");
         JPanel content = createOptionContentPanel();
 
-        optCopyAll = new JRadioButton("Copy cau truc va du lieu", true);
-        optStructureOnly = new JRadioButton("Chi copy cau truc (DDL)");
-        optDataOnly = new JRadioButton("Chi copy du lieu (DML)");
+        optCopyAll = new JRadioButton("Copy structure and data", true);
+        optStructureOnly = new JRadioButton("Structure only (DDL)");
+        optDataOnly = new JRadioButton("Data only (DML)");
         styleOptionToggle(optCopyAll);
         styleOptionToggle(optStructureOnly);
         styleOptionToggle(optDataOnly);
@@ -516,12 +516,12 @@ public class MigrationAppUI extends JFrame {
     }
 
     private JPanel createSection2CoreOptionsPanel() {
-        JPanel section = createOptionSection("2. TUY CHON CO BAN");
+        JPanel section = createOptionSection("2. CORE OPTIONS");
         JPanel content = createOptionContentPanel();
 
-        chkTruncateTarget = new JCheckBox("Xoa du lieu cu target truoc khi migrate (TRUNCATE)");
-        chkCopyNewOnly = new JCheckBox("Chi copy ban ghi moi (theo PK — bo qua trung lap)");
-        chkCopyOnlyTargetEmptyTables = new JCheckBox("Chi copy data cho cac bang target dang rong");
+        chkTruncateTarget = new JCheckBox("Clear existing target data before migration (TRUNCATE)");
+        chkCopyNewOnly = new JCheckBox("Copy only new records (by PK, skip duplicates)");
+        chkCopyOnlyTargetEmptyTables = new JCheckBox("Copy data only for empty target tables");
         styleOptionToggle(chkTruncateTarget);
         styleOptionToggle(chkCopyNewOnly);
         styleOptionToggle(chkCopyOnlyTargetEmptyTables);
@@ -535,43 +535,43 @@ public class MigrationAppUI extends JFrame {
         JPanel row2 = createInlineRowPanel();
         row2.add(makeOptionLabel("Batch size (rows/batch):"));
         batchSizeField = new JTextField("1000", 7);
-        batchSizeField.setToolTipText("So dong migrate trong mot batch. Tang de toc do, giam de tranh tran bo nho.");
+        batchSizeField.setToolTipText("Rows processed per batch. Increase for speed, decrease for lower memory usage.");
         styleOptionField(batchSizeField);
         row2.add(batchSizeField);
         row2.add(Box.createHorizontalStrut(14));
-        row2.add(makeOptionLabel("Limit/bang (0 = tat ca):"));
+        row2.add(makeOptionLabel("Limit/table (0 = all):"));
         limitDataField = new JTextField("0", 7);
-        limitDataField.setToolTipText("Nhap 0 de copy toan bo dong.");
+        limitDataField.setToolTipText("Use 0 to copy all rows.");
         styleOptionField(limitDataField);
         row2.add(limitDataField);
         row2.add(Box.createHorizontalStrut(14));
         row2.add(makeOptionLabel("Data threads (0 = auto):"));
         dataThreadsField = new JTextField("0", 5);
-        dataThreadsField.setToolTipText("So luong thread cho phase migrate data. 0 = tu dong theo pool/table.");
+        dataThreadsField.setToolTipText("Thread count for data phase. 0 = auto by pool/table.");
         styleOptionField(dataThreadsField);
         row2.add(dataThreadsField);
         content.add(row2);
         content.add(Box.createVerticalStrut(6));
 
         includeTablesField = new JTextField("", 28);
-        includeTablesField.setToolTipText("Ho tro wildcard * (vi du: user*,order_*). Bo trong = migrate tat ca.");
+        includeTablesField.setToolTipText("Supports wildcard * (e.g., user*,order_*). Empty = migrate all tables.");
         styleOptionField(includeTablesField);
         includeTablesField.setPreferredSize(new Dimension(260, 26));
-        content.add(createLabeledStretchFieldRow("Include bang (CSV):", includeTablesField, 140));
+        content.add(createLabeledStretchFieldRow("Include tables (CSV):", includeTablesField, 140));
         content.add(Box.createVerticalStrut(6));
 
         excludeTablesField = new JTextField("", 28);
-        excludeTablesField.setToolTipText("Ho tro wildcard * (vi du: temp_*,audit*).");
+        excludeTablesField.setToolTipText("Supports wildcard * (e.g., temp_*,audit*).");
         styleOptionField(excludeTablesField);
         excludeTablesField.setPreferredSize(new Dimension(260, 26));
-        content.add(createLabeledStretchFieldRow("Exclude bang (CSV):", excludeTablesField, 140));
+        content.add(createLabeledStretchFieldRow("Exclude tables (CSV):", excludeTablesField, 140));
 
         section.add(content, BorderLayout.NORTH);
         return section;
     }
 
     private JPanel createSection3AdvancedPanel() {
-        JPanel section = createOptionSection("3. DOI TUONG NANG CAO");
+        JPanel section = createOptionSection("3. ADVANCED OBJECTS");
         JPanel content = createOptionContentPanel();
 
         chkMigrateSequences = new JCheckBox("Sequences");
@@ -601,7 +601,7 @@ public class MigrationAppUI extends JFrame {
         JPanel content = createOptionContentPanel();
 
         chkMigrateViews = new JCheckBox("Migrate views");
-        chkReplaceExistingViews = new JCheckBox("Thay the views da ton tai (DROP + CREATE)");
+        chkReplaceExistingViews = new JCheckBox("Replace existing views (DROP + CREATE)");
         styleOptionToggle(chkMigrateViews);
         styleOptionToggle(chkReplaceExistingViews);
         content.add(chkMigrateViews);
@@ -612,7 +612,7 @@ public class MigrationAppUI extends JFrame {
         JPanel includeViewsPanel = createInlineRowPanel();
         includeViewsPanel.add(makeOptionLabel("Include views (CSV):"));
         includeViewsField = new JTextField("", 28);
-        includeViewsField.setToolTipText("Ho tro wildcard * (vi du: v_user*,v_order_*).");
+        includeViewsField.setToolTipText("Supports wildcard * (e.g., v_user*,v_order_*).");
         styleOptionField(includeViewsField);
         includeViewsField.setPreferredSize(new Dimension(230, 26));
         includeViewsPanel.add(includeViewsField);
@@ -622,7 +622,7 @@ public class MigrationAppUI extends JFrame {
         JPanel excludeViewsPanel = createInlineRowPanel();
         excludeViewsPanel.add(makeOptionLabel("Exclude views  (CSV):"));
         excludeViewsField = new JTextField("", 28);
-        excludeViewsField.setToolTipText("Ho tro wildcard * (vi du: v_temp*).");
+        excludeViewsField.setToolTipText("Supports wildcard * (e.g., v_temp*).");
         styleOptionField(excludeViewsField);
         excludeViewsField.setPreferredSize(new Dimension(230, 26));
         excludeViewsPanel.add(excludeViewsField);
@@ -633,21 +633,21 @@ public class MigrationAppUI extends JFrame {
     }
 
     private JPanel createSection5RetryPanel() {
-        JPanel section = createOptionSection("5. RETRY / TU DONG THU LAI");
+        JPanel section = createOptionSection("5. RETRY");
         JPanel content = createOptionContentPanel();
 
-        chkRetryEnabled = new JCheckBox("Bat dau tinh nang retry khi gap loi tam thoi");
+        chkRetryEnabled = new JCheckBox("Enable retry for temporary failures");
         styleOptionToggle(chkRetryEnabled);
         content.add(chkRetryEnabled);
         content.add(Box.createVerticalStrut(8));
 
         JPanel retryRow1 = createInlineRowPanel();
-        retryRow1.add(makeOptionLabel("So lan retry toi da:"));
+        retryRow1.add(makeOptionLabel("Max retry attempts:"));
         retryMaxAttemptsField = new JTextField("3", 5);
         styleOptionField(retryMaxAttemptsField);
         retryRow1.add(retryMaxAttemptsField);
         retryRow1.add(Box.createHorizontalStrut(10));
-        retryRow1.add(makeOptionLabel("Delay ban dau (ms):"));
+        retryRow1.add(makeOptionLabel("Initial delay (ms):"));
         retryDelayMsField = new JTextField("2000", 7);
         styleOptionField(retryDelayMsField);
         retryRow1.add(retryDelayMsField);
@@ -666,10 +666,10 @@ public class MigrationAppUI extends JFrame {
     }
 
     private JPanel createSection6ResumePanel() {
-        JPanel section = createOptionSection("6. RESUME / TIEP TUC TU DIEM DA DUNG");
+        JPanel section = createOptionSection("6. RESUME");
         JPanel content = createOptionContentPanel();
 
-        chkResumeEnabled = new JCheckBox("Bat dau tinh nang resume (tiep tuc tu diem da dung)");
+        chkResumeEnabled = new JCheckBox("Enable resume (continue from checkpoint)");
         styleOptionToggle(chkResumeEnabled);
         content.add(chkResumeEnabled);
         content.add(Box.createVerticalStrut(8));
@@ -677,11 +677,11 @@ public class MigrationAppUI extends JFrame {
         JPanel resumeRow1 = createInlineRowPanel();
         resumeRow1.add(makeOptionLabel("File checkpoint:"));
         resumeStateFileField = new JTextField(".migration-resume.properties", 26);
-        resumeStateFileField.setToolTipText("Duong dan tuyet doi hoac tuong doi toi file checkpoint.");
+        resumeStateFileField.setToolTipText("Absolute or relative path to checkpoint file.");
         styleOptionField(resumeStateFileField);
         resumeStateFileField.setPreferredSize(new Dimension(220, 26));
         resumeRow1.add(resumeStateFileField);
-        this.chkResumeReset = new JCheckBox("Reset checkpoint cu?");
+        this.chkResumeReset = new JCheckBox("Reset existing checkpoint?");
         styleOptionToggle(this.chkResumeReset);
         resumeRow1.add(Box.createHorizontalStrut(10));
         resumeRow1.add(this.chkResumeReset);
@@ -806,7 +806,7 @@ public class MigrationAppUI extends JFrame {
     /** SwingUtilities.invokeLater wrapper */
     public void appendLog(String message) {
         SwingUtilities.invokeLater(() -> {
-            logArea.append(message + "\n");
+            logArea.append((message == null ? "" : message) + "\n");
             logArea.setCaretPosition(logArea.getDocument().getLength());
         });
     }
@@ -825,7 +825,7 @@ public class MigrationAppUI extends JFrame {
             sourceConfig = buildDatabaseConfig(true);
             targetConfig = buildDatabaseConfig(false);
         } catch (IllegalArgumentException e) {
-            JOptionPane.showMessageDialog(this, e.getMessage(), "Loi cau hinh", JOptionPane.ERROR_MESSAGE);
+            JOptionPane.showMessageDialog(this, e.getMessage(), "Configuration Error", JOptionPane.ERROR_MESSAGE);
             return;
         }
 
@@ -902,7 +902,7 @@ public class MigrationAppUI extends JFrame {
         progressBar.setValue(0);
         logArea.setText("");
 
-        appendLog("=== BAT DAU MIGRATION ===");
+        appendLog("=== START MIGRATION ===");
         appendLog("Source: " + sourceConfig);
         appendLog("Target: " + targetConfig);
         appendLog("Schema source=" + sourceSchema + " | target=" + targetSchema);
@@ -1022,12 +1022,12 @@ public class MigrationAppUI extends JFrame {
     private DatabaseType parseDatabaseType(String selected) {
         if ("Oracle".equalsIgnoreCase(selected)) return DatabaseType.ORACLE;
         if ("PostgreSQL".equalsIgnoreCase(selected)) return DatabaseType.POSTGRESQL;
-        throw new IllegalArgumentException("Database Type khong hop le: " + selected);
+        throw new IllegalArgumentException("Invalid database type: " + selected);
     }
 
     private String requireText(JTextField field, String label) {
         String v = field.getText();
-        if (v == null || v.isBlank()) throw new IllegalArgumentException(label + " khong duoc de trong.");
+        if (v == null || v.isBlank()) throw new IllegalArgumentException(label + " must not be empty.");
         return v.trim();
     }
 
@@ -1043,7 +1043,7 @@ public class MigrationAppUI extends JFrame {
         try {
             return Integer.parseInt(raw.trim());
         } catch (NumberFormatException e) {
-            throw new IllegalArgumentException("Port khong hop le: " + raw);
+            throw new IllegalArgumentException("Invalid port: " + raw);
         }
     }
 
@@ -1068,10 +1068,10 @@ public class MigrationAppUI extends JFrame {
         if (raw == null || raw.isBlank()) return defaultVal;
         try {
             int v = Integer.parseInt(raw.trim());
-            if (v < 0) throw new IllegalArgumentException(label + " phai >= 0.");
+            if (v < 0) throw new IllegalArgumentException(label + " must be >= 0.");
             return v;
         } catch (NumberFormatException e) {
-            throw new IllegalArgumentException(label + " khong hop le: " + raw);
+            throw new IllegalArgumentException("Invalid " + label + ": " + raw);
         }
     }
 
@@ -1081,7 +1081,7 @@ public class MigrationAppUI extends JFrame {
         try {
             return Long.parseLong(raw.trim());
         } catch (NumberFormatException e) {
-            throw new IllegalArgumentException(label + " khong hop le: " + raw);
+            throw new IllegalArgumentException("Invalid " + label + ": " + raw);
         }
     }
 
@@ -1091,7 +1091,7 @@ public class MigrationAppUI extends JFrame {
         try {
             return Double.parseDouble(raw.trim());
         } catch (NumberFormatException e) {
-            throw new IllegalArgumentException(label + " khong hop le: " + raw);
+            throw new IllegalArgumentException("Invalid " + label + ": " + raw);
         }
     }
 
@@ -1115,7 +1115,7 @@ public class MigrationAppUI extends JFrame {
             String defaultName = buildSuggestedCredentialName(isSource, config);
             String credentialName = JOptionPane.showInputDialog(
                     this,
-                    "Nhap ten credential:",
+                    "Enter credential name:",
                     defaultName
             );
 
@@ -1125,16 +1125,16 @@ public class MigrationAppUI extends JFrame {
 
             String trimmed = credentialName.trim();
             if (trimmed.isEmpty()) {
-                JOptionPane.showMessageDialog(this, "Ten credential khong duoc de trong.", "Loi", JOptionPane.ERROR_MESSAGE);
+                JOptionPane.showMessageDialog(this, "Credential name must not be empty.", "Error", JOptionPane.ERROR_MESSAGE);
                 return;
             }
 
             credentialStore.saveOrUpdate(trimmed, config);
             refreshSavedCredentialsCombos();
-            appendLog("[OK] Da luu credential '" + trimmed + "' vao file JSON.");
+            appendLog("[OK] Saved credential '" + trimmed + "' to JSON file.");
         } catch (RuntimeException e) {
-            JOptionPane.showMessageDialog(this, e.getMessage(), "Loi luu credential", JOptionPane.ERROR_MESSAGE);
-            appendLog("[LOI] Luu credential that bai: " + e.getMessage());
+            JOptionPane.showMessageDialog(this, e.getMessage(), "Credential Save Error", JOptionPane.ERROR_MESSAGE);
+            appendLog("[ERROR] Failed to save credential: " + e.getMessage());
         }
     }
 
@@ -1146,19 +1146,19 @@ public class MigrationAppUI extends JFrame {
 
         Object selected = combo.getSelectedItem();
         if (selected == null) {
-            JOptionPane.showMessageDialog(this, "Hay chon credential de nap.", "Thong bao", JOptionPane.INFORMATION_MESSAGE);
+            JOptionPane.showMessageDialog(this, "Please choose a credential to load.", "Information", JOptionPane.INFORMATION_MESSAGE);
             return;
         }
 
         String name = String.valueOf(selected);
         SavedCredentialJsonStore.SavedDbCredential credential = credentialByName.get(name);
         if (credential == null) {
-            JOptionPane.showMessageDialog(this, "Khong tim thay credential da chon.", "Loi", JOptionPane.ERROR_MESSAGE);
+            JOptionPane.showMessageDialog(this, "Selected credential was not found.", "Error", JOptionPane.ERROR_MESSAGE);
             return;
         }
 
         applyCredentialToForm(isSource, credential.config());
-        appendLog("[OK] Da nap credential '" + name + "' cho " + (isSource ? "SOURCE" : "TARGET") + ".");
+        appendLog("[OK] Loaded credential '" + name + "' for " + (isSource ? "SOURCE" : "TARGET") + ".");
     }
 
     private void refreshSavedCredentialsCombos() {
@@ -1183,7 +1183,7 @@ public class MigrationAppUI extends JFrame {
                 }
             }
         } catch (RuntimeException e) {
-            appendLog("[WARN] Khong tai duoc danh sach credential: " + e.getMessage());
+            appendLog("[WARN] Unable to load credential list: " + e.getMessage());
         }
     }
 
@@ -1249,15 +1249,15 @@ public class MigrationAppUI extends JFrame {
         try {
             DatabaseConfig config = buildDatabaseConfig(isSource);
             String label = isSource ? "SOURCE" : "TARGET";
-            appendLog("Dang test ket noi " + label + "...");
+            appendLog("Testing connection " + label + "...");
             mgr.createPool(poolId, config);
             if (mgr.testConnection(poolId)) {
-                appendLog("[OK] " + label + " ket noi thanh cong.\n");
+                appendLog("[OK] " + label + " connection successful.\n");
             } else {
-                appendLog("[LOI] " + label + " khong the ket noi.\n");
+                appendLog("[ERROR] " + label + " cannot connect.\n");
             }
         } catch (Exception e) {
-            appendLog("[LOI] " + e.getMessage() + "\n");
+            appendLog("[ERROR] " + e.getMessage() + "\n");
         } finally {
             mgr.closePool(poolId);
         }
@@ -1270,7 +1270,7 @@ public class MigrationAppUI extends JFrame {
 
         // Top row: Start button + Progress bar
         JPanel topRow = new JPanel(new BorderLayout(5, 5));
-        btnStartMigration = createPrimaryActionButton("BAT DAU MIGRATION");
+        btnStartMigration = createPrimaryActionButton("START MIGRATION");
         btnStartMigration.setForeground(Color.WHITE);
         btnStartMigration.addActionListener(e -> startMigrationAction());
         topRow.add(btnStartMigration, BorderLayout.WEST);
@@ -1376,7 +1376,7 @@ public class MigrationAppUI extends JFrame {
             UIManager.setLookAndFeel(UIManager.getSystemLookAndFeelClassName());
         } catch (ClassNotFoundException | InstantiationException
                 | IllegalAccessException | UnsupportedLookAndFeelException e) {
-            System.err.println("Khong the dat LookAndFeel: " + e.getMessage());
+            System.err.println("Unable to set LookAndFeel: " + e.getMessage());
         }
         SwingUtilities.invokeLater(() -> new MigrationAppUI().setVisible(true));
     }

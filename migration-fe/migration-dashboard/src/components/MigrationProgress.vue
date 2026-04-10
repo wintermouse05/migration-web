@@ -1,7 +1,7 @@
 <template>
   <section class="progress-wrap" v-if="isMigrating || progress > 0">
     <div class="progress-title-row">
-      <strong>Tien trinh migration</strong>
+      <strong>Migration progress</strong>
       <span>{{ normalizedProgress }}%</span>
     </div>
 

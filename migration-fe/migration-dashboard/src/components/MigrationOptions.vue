@@ -1,31 +1,31 @@
 <template>
   <section class="card">
     <header class="card-header">
-      <h2>Tuy chon Migration</h2>
-      <p class="card-note">Neu tien trinh bi treo hon 5 phut ma khong co log moi, vui long kiem tra ket noi DB.</p>
+      <h2>Migration Options</h2>
+      <p class="card-note">If the process stalls for over 5 minutes without new logs, please verify database connectivity.</p>
     </header>
 
     <div class="sections-grid">
       <article class="option-section">
-        <h3>1. Che do Migration</h3>
+        <h3>1. Migration Mode</h3>
         <div class="radio-stack">
           <label class="option-line">
             <input v-model="localMode" type="radio" value="ALL" />
-            Copy cau truc va du lieu
+            Copy structure and data
           </label>
           <label class="option-line">
             <input v-model="localMode" type="radio" value="STRUCTURE_ONLY" />
-            Chi copy cau truc (DDL)
+            Structure only (DDL)
           </label>
           <label class="option-line">
             <input v-model="localMode" type="radio" value="DATA_ONLY" />
-            Chi copy du lieu (DML)
+            Data only (DML)
           </label>
         </div>
       </article>
 
       <article class="option-section">
-        <h3>2. Tuy chon co ban</h3>
+        <h3>2. Core Options</h3>
         <div class="content-stack">
           <label class="option-line">
             <input
@@ -33,7 +33,7 @@
               type="checkbox"
               :disabled="isStructureOnlyMode"
             />
-            Xoa du lieu cu target truoc khi migrate (TRUNCATE)
+            Clear existing target data before migration (TRUNCATE)
           </label>
 
           <label class="option-line">
@@ -42,7 +42,7 @@
               type="checkbox"
               :disabled="isStructureOnlyMode"
             />
-            Chi copy ban ghi moi (theo PK, bo qua trung lap)
+            Copy only new records (by PK, skip duplicates)
           </label>
 
           <label class="option-line">
@@ -51,11 +51,11 @@
               type="checkbox"
               :disabled="isStructureOnlyMode"
             />
-            Chi copy du lieu cho cac bang target dang rong
+            Copy data only for empty target tables
           </label>
 
           <label class="field-line">
-            <span>Limit moi bang (0 = tat ca)</span>
+            <span>Per-table limit (0 = all rows)</span>
             <input
               v-model.number="localOptions.limit"
               type="number"
@@ -65,7 +65,7 @@
           </label>
 
           <label class="field-line">
-            <span>Include bang (CSV)</span>
+            <span>Include tables (CSV)</span>
             <input
               v-model.trim="localOptions.includeTablesCsv"
               type="text"
@@ -74,7 +74,7 @@
           </label>
 
           <label class="field-line">
-            <span>Exclude bang (CSV)</span>
+            <span>Exclude tables (CSV)</span>
             <input
               v-model.trim="localOptions.excludeTablesCsv"
               type="text"
@@ -85,7 +85,7 @@
       </article>
 
       <article class="option-section">
-        <h3>3. Doi tuong nang cao</h3>
+        <h3>3. Advanced Objects</h3>
         <div class="check-grid">
           <label class="option-line half">
             <input v-model="localOptions.migrateSequences" type="checkbox" :disabled="isDataOnlyMode" />
@@ -120,7 +120,7 @@
               type="checkbox"
               :disabled="isViewOptionsDisabled"
             />
-            Thay the views da ton tai (DROP + CREATE)
+            Replace existing views (DROP + CREATE)
           </label>
 
           <label class="field-line">
@@ -146,15 +146,15 @@
       </article>
 
       <article class="option-section">
-        <h3>5. Retry / Tu dong thu lai</h3>
+        <h3>5. Retry</h3>
         <div class="content-stack">
           <label class="option-line">
             <input v-model="localRetry.enabled" type="checkbox" />
-            Bat dau tinh nang retry khi gap loi tam thoi
+            Enable retry when temporary errors occur
           </label>
 
           <label class="field-line compact">
-            <span>So lan retry toi da</span>
+            <span>Max retry attempts</span>
             <input
               v-model.number="localRetry.maxAttempts"
               type="number"
@@ -166,7 +166,7 @@
           </label>
 
           <label class="field-line compact">
-            <span>Delay ban dau (ms)</span>
+            <span>Initial delay (ms)</span>
             <input
               v-model.number="localRetry.initialDelayMs"
               type="number"
@@ -178,7 +178,7 @@
           </label>
 
           <label class="field-line compact">
-            <span>He so backoff</span>
+            <span>Backoff multiplier</span>
             <input
               v-model.number="localRetry.backoffMultiplier"
               type="number"
@@ -193,11 +193,11 @@
       </article>
 
       <article class="option-section">
-        <h3>6. Resume / Tiep tuc</h3>
+        <h3>6. Resume</h3>
         <div class="content-stack">
           <label class="option-line">
             <input v-model="localResume.enabled" type="checkbox" />
-            Bat dau tinh nang resume (tiep tuc tu diem da dung)
+            Enable resume (continue from last checkpoint)
           </label>
 
           <label class="field-line">
@@ -216,7 +216,7 @@
               type="checkbox"
               :disabled="!localResume.enabled"
             />
-            Xoa checkpoint cu truoc khi bat dau
+            Reset previous checkpoint before start
           </label>
         </div>
       </article>

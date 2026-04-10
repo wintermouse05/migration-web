@@ -6,13 +6,13 @@
     </header>
 
     <section class="credential-panel">
-      <p class="panel-title">Credential nhanh</p>
+      <p class="panel-title">Quick credentials</p>
 
       <div class="credential-grid">
         <label class="credential-field">
-          <span>Chon cau hinh da luu</span>
+          <span>Saved credential</span>
           <select :value="selectedSavedCredentialId" @change="onSelectSavedCredential">
-            <option value="">-- Chon mot cau hinh da luu --</option>
+            <option value="">-- Select a saved credential --</option>
             <option
               v-for="credential in savedCredentials"
               :key="credential.id"
@@ -24,18 +24,18 @@
         </label>
 
         <label class="credential-field">
-          <span>Ten de luu nhanh (tu chon)</span>
+          <span>Quick save name (optional)</span>
           <input
             v-model.trim="saveCredentialName"
             type="text"
-            placeholder="Vi du: Oracle QA, PG Local"
+            placeholder="Example: Oracle QA, PG Local"
           />
         </label>
       </div>
 
       <div class="save-row">
         <button class="save-btn" type="button" :disabled="isSavingCredential" @click="onSaveCredential">
-          {{ isSavingCredential ? 'Dang luu...' : 'Luu credential' }}
+          {{ isSavingCredential ? 'Saving...' : 'Save credential' }}
         </button>
 
         <span v-if="saveCredentialError" class="save-error">
@@ -53,7 +53,7 @@
 
     <div class="form-grid">
       <label class="field-row">
-        <span>Loai co so du lieu</span>
+        <span>Database type</span>
         <select v-model="localConfig.type">
           <option value="ORACLE">Oracle</option>
           <option value="POSTGRESQL">PostgreSQL</option>
@@ -61,13 +61,13 @@
       </label>
 
       <label class="field-row">
-        <span>JDBC URL (uu tien)</span>
+        <span>JDBC URL (preferred)</span>
         <input
           v-model.trim="localConfig.jdbcUrl"
           type="text"
           placeholder="jdbc:postgresql://localhost:5432/migration_db"
         />
-        <small class="field-note">Neu co URL, he thong se uu tien dung URL thay vi Host/Port/DB Name.</small>
+        <small class="field-note">When provided, JDBC URL is used instead of Host/Port/DB Name.</small>
       </label>
 
       <label class="field-row">
@@ -86,7 +86,7 @@
       </label>
 
       <label class="field-row">
-        <span>Schema (tuy chon)</span>
+        <span>Schema (optional)</span>
         <input v-model.trim="localConfig.schemaName" type="text" placeholder="public, scott, ..." />
       </label>
 
@@ -106,7 +106,7 @@
         {{ testState.message }}
       </span>
       <button class="test-btn" type="button" :disabled="isTesting" @click="emit('test-connection')">
-        {{ isTesting ? 'Dang test...' : 'Test connection' }}
+        {{ isTesting ? 'Testing...' : 'Test connection' }}
       </button>
     </div>
   </section>
@@ -192,7 +192,7 @@ watch(saveCredentialName, () => {
 const onSaveCredential = () => {
   const trimmedName = saveCredentialName.value.trim();
   if (!trimmedName) {
-    saveCredentialError.value = 'Hay nhap ten de luu truoc khi bam nut luu.';
+    saveCredentialError.value = 'Please enter a credential name before saving.';
     return;
   }
 

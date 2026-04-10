@@ -65,7 +65,7 @@ public class SavedCredentialService {
 
             try (ResultSet rs = statement.executeQuery()) {
                 if (!rs.next()) {
-                    throw new IllegalStateException("Khong the luu credential vao storage.");
+                    throw new IllegalStateException("Unable to save credential to storage.");
                 }
                 long id = rs.getLong("id");
                 Timestamp createdAt = rs.getTimestamp("created_at");
@@ -77,7 +77,7 @@ public class SavedCredentialService {
                 );
             }
         } catch (SQLException e) {
-            throw new IllegalStateException("Loi luu credential: " + e.getMessage(), e);
+            throw new IllegalStateException("Credential save failed: " + e.getMessage(), e);
         }
     }
 
@@ -119,7 +119,7 @@ public class SavedCredentialService {
 
             return results;
         } catch (SQLException e) {
-            throw new IllegalStateException("Loi tai danh sach credentials: " + e.getMessage(), e);
+            throw new IllegalStateException("Failed to load credential list: " + e.getMessage(), e);
         }
     }
 
@@ -130,7 +130,7 @@ public class SavedCredentialService {
 
         if (jdbcUrl == null || jdbcUrl.isBlank()) {
             throw new IllegalStateException(
-                    "Chua cau hinh credential.store.jdbc-url de luu credentials vao PostgreSQL."
+                    "credential.store.jdbc-url is not configured for PostgreSQL credential storage."
             );
         }
 
@@ -169,9 +169,9 @@ public class SavedCredentialService {
             }
             storageInitialized = true;
         } catch (ClassNotFoundException e) {
-            throw new IllegalStateException("Khong tim thay PostgreSQL JDBC driver.", e);
+            throw new IllegalStateException("PostgreSQL JDBC driver not found.", e);
         } catch (SQLException e) {
-            throw new IllegalStateException("Khong the tao table " + TABLE_NAME + ": " + e.getMessage(), e);
+            throw new IllegalStateException("Unable to create table " + TABLE_NAME + ": " + e.getMessage(), e);
         }
     }
 
@@ -239,33 +239,33 @@ public class SavedCredentialService {
 
     private static void validateInput(String displayName, DatabaseConfig config) {
         if (displayName == null || displayName.isBlank()) {
-            throw new IllegalArgumentException("Ten goi y de luu credential khong duoc de trong.");
+            throw new IllegalArgumentException("Credential display name must not be empty.");
         }
         if (config == null) {
-            throw new IllegalArgumentException("Thieu thong tin ket noi database.");
+            throw new IllegalArgumentException("Missing database connection information.");
         }
         if (config.getType() == null) {
-            throw new IllegalArgumentException("Loai database khong hop le.");
+            throw new IllegalArgumentException("Invalid database type.");
         }
 
         boolean hasJdbcUrl = config.getJdbcUrlValue() != null && !config.getJdbcUrlValue().isBlank();
         if (!hasJdbcUrl) {
             if (config.getHost() == null || config.getHost().isBlank()) {
-                throw new IllegalArgumentException("Host khong duoc de trong.");
+                throw new IllegalArgumentException("Host must not be empty.");
             }
             if (config.getPort() <= 0) {
-                throw new IllegalArgumentException("Port phai lon hon 0.");
+                throw new IllegalArgumentException("Port must be greater than 0.");
             }
             if (config.getDatabaseName() == null || config.getDatabaseName().isBlank()) {
-                throw new IllegalArgumentException("Ten database/SID khong duoc de trong.");
+                throw new IllegalArgumentException("Database name/SID must not be empty.");
             }
         }
 
         if (config.getUsername() == null || config.getUsername().isBlank()) {
-            throw new IllegalArgumentException("Username khong duoc de trong.");
+            throw new IllegalArgumentException("Username must not be empty.");
         }
         if (config.getPassword() == null) {
-            throw new IllegalArgumentException("Password khong duoc null.");
+            throw new IllegalArgumentException("Password must not be null.");
         }
     }
 

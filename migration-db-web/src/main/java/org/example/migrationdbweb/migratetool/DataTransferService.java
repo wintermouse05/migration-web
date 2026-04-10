@@ -65,7 +65,7 @@ public class DataTransferService {
     }
 
     /**
-     * Constructor cho phép truyền retry policy tùy chỉnh (dùng trong web service).
+     * Constructor that accepts a custom retry policy (used by web service flow).
      */
     public DataTransferService(SqlGenerator sqlGenerator, MigrationRetryPolicy retryPolicy) {
         this.sqlGenerator = sqlGenerator;
@@ -74,11 +74,11 @@ public class DataTransferService {
     }
 
     /**
-     * Chuyển dữ liệu của một bảng từ Source sang Target
-     * * @param sourceConn Kết nối DB Nguồn
-     * @param targetConn Kết nối DB Đích
-     * @param table      Định nghĩa bảng
-     * @param batchSize  Kích thước mỗi lô (ví dụ: 1000, 5000)
+     * Transfer table data from source DB to target DB.
+     * @param sourceConn source DB connection
+     * @param targetConn target DB connection
+     * @param table table definition
+     * @param batchSize batch size (for example: 1000, 5000)
      */
     public void transferTableData(Connection sourceConn, Connection targetConn, TableDefinition table, int batchSize) throws SQLException {
         transferTableData(sourceConn, targetConn, table, batchSize, null, false, 0, null);
@@ -143,8 +143,8 @@ public class DataTransferService {
         int safeStartOffset = Math.max(0, startOffset);
         boolean hasPrimaryKey = !table.getPrimaryKeys().isEmpty();
         if (safeStartOffset > 0 && !hasPrimaryKey) {
-            System.out.println("Bang " + table.getTableName()
-                    + " khong co PK, khong the resume theo offset an toan. Bat dau lai tu dau bang.");
+            System.out.println("Table " + table.getTableName()
+                + " has no PK; cannot safely resume by offset. Restarting from row 0.");
             safeStartOffset = 0;
         }
 
@@ -169,7 +169,7 @@ public class DataTransferService {
         sourceConn.setAutoCommit(false);
         targetConn.setAutoCommit(false);
 
-        System.out.println("Bắt đầu migrate dữ liệu bảng: " + table.getTableName());
+        System.out.println("Starting data transfer for table: " + table.getTableName());
 
         // Sử dụng TYPE_FORWARD_ONLY và CONCUR_READ_ONLY đềEtối ưu hóa bềEnhềEkhi đọc
         try (Statement sourceStmt = sourceConn.createStatement(ResultSet.TYPE_FORWARD_ONLY, ResultSet.CONCUR_READ_ONLY);
@@ -195,7 +195,7 @@ public class DataTransferService {
                     skippedByOffset++;
                 }
                 if (skippedByOffset > 0) {
-                    System.out.println("Resume bang " + table.getTableName() + ": bo qua " + skippedByOffset + " rows da commit.");
+                    System.out.println("Resuming table " + table.getTableName() + ": skipped " + skippedByOffset + " already-committed rows.");
                 }
 
                 while (rs.next()) {
@@ -239,7 +239,7 @@ public class DataTransferService {
                             progressListener.onBatchCommitted(table.getTableName(), currentBatchCount, totalTransferred, totalSkipped);
                         }
                         currentBatchCount = 0;
-                        System.out.println("  -> Đã copy " + totalTransferred + " rows...");
+                        System.out.println("  -> Copied " + totalTransferred + " rows...");
                     }
                 }
 
@@ -249,16 +249,16 @@ public class DataTransferService {
                     if (progressListener != null) {
                         progressListener.onBatchCommitted(table.getTableName(), currentBatchCount, totalTransferred, totalSkipped);
                     }
-                    System.out.println("  -> Đã copy " + totalTransferred + " rows...");
+                    System.out.println("  -> Copied " + totalTransferred + " rows...");
                 }
 
                 if (sourceRowsRead == 0) {
-                    System.err.println("[DATA-WARN] Bang " + table.getTableName()
-                            + " khong co dong nao tu source query."
-                            + " Kiem tra schema/DB name va du lieu nguon. SQL=" + selectSql);
+                    System.err.println("[DATA-WARN] Table " + table.getTableName()
+                            + " returned no rows from source query."
+                            + " Check schema/DB name and source data. SQL=" + selectSql);
                 }
 
-                System.out.println("Hoàn tất! Tổng cộng: " + totalTransferred + " rows cho bảng " + table.getTableName());
+                System.out.println("Completed. Total rows copied: " + totalTransferred + " for table " + table.getTableName());
                 return new TransferResult(safeStartOffset, totalTransferred, totalSkipped, limitReached);
             }
 
@@ -270,9 +270,9 @@ public class DataTransferService {
                 && !copyNewOnly
                 && !table.getPrimaryKeys().isEmpty()
                 && isDuplicateKeyViolation(e)) {
-            System.err.println("[DATA-WARN] Bang " + table.getTableName()
-                + " gap duplicate key (vi du ORA-00001)."
-                + " Thu lai voi che do copyNewOnly=true de bo qua ban ghi da ton tai theo PK.");
+            System.err.println("[DATA-WARN] Table " + table.getTableName()
+                + " hit duplicate key errors (for example ORA-00001)."
+                + " Retrying with copyNewOnly=true to skip existing PK rows.");
             return transferTableDataInternal(
                 sourceConn,
                 targetConn,
@@ -286,8 +286,8 @@ public class DataTransferService {
             );
             }
 
-            System.err.println("Lỗi khi transfer dữ liệu bảng " + table.getTableName()
-                    + ". Đã rollback! SQLState=" + e.getSQLState()
+            System.err.println("Error while transferring table " + table.getTableName()
+                    + ". Rolled back transaction. SQLState=" + e.getSQLState()
                     + ", ErrorCode=" + e.getErrorCode()
                     + ", Message=" + e.getMessage()
                     + ", Detail=" + buildSqlExceptionDetail(e));
@@ -351,14 +351,14 @@ public class DataTransferService {
                 if (!isRetryableException(e) || attempt == attempts) {
                     String detail = buildSqlExceptionDetail(e);
                     throw new SQLException(
-                        "Khong the execute batch bang " + tableName + " sau " + attempt + " lan thu. Chi tiet: " + detail,
+                        "Unable to execute batch for table " + tableName + " after " + attempt + " attempts. Details: " + detail,
                             e
                     );
                 }
 
                 long delayMs = retryPolicy.delayForAttempt(attempt);
-                System.err.println("Batch loi tam thoi bang " + tableName + " lan " + attempt + "/" + attempts
-                        + ", retry sau " + delayMs + " ms. Ly do: " + buildSqlExceptionDetail(e));
+                System.err.println("Transient batch error on table " + tableName + " attempt " + attempt + "/" + attempts
+                        + ", retry in " + delayMs + " ms. Reason: " + buildSqlExceptionDetail(e));
                 sleep(delayMs);
             }
         }
@@ -366,7 +366,7 @@ public class DataTransferService {
 
     private static String buildSqlExceptionDetail(SQLException e) {
         if (e == null) {
-            return "(khong co thong tin loi)";
+            return "(no error details)";
         }
 
         StringBuilder sb = new StringBuilder();
@@ -451,7 +451,7 @@ public class DataTransferService {
             Thread.sleep(millis);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-            throw new SQLException("Tien trinh retry batch bi gian doan.", e);
+            throw new SQLException("Batch retry process was interrupted.", e);
         }
     }
 
@@ -497,7 +497,7 @@ public class DataTransferService {
 
             if (foundIndex == -1) {
                 throw new IllegalArgumentException(
-                        "Không tìm thấy cột PK " + pkName + " trong bảng " + table.getTableName()
+                        "Cannot find PK column " + pkName + " in table " + table.getTableName()
                 );
             }
 
@@ -612,12 +612,12 @@ public class DataTransferService {
         }
 
         throw new SQLException(
-                "Khong the bind gia tri cho bang " + tableName
-                        + ", cot " + column.getName()
-                        + ", jdbcType=" + jdbcType
-                        + ", valueClass=" + value.getClass().getName()
-                        + ". Loi: " + cause.getMessage(),
-                cause
+            "Unable to bind value for table " + tableName
+                + ", column " + column.getName()
+                + ", jdbcType=" + jdbcType
+                + ", valueClass=" + (value == null ? "null" : value.getClass().getName())
+                + ". Error: " + cause.getMessage(),
+            cause
         );
     }
 
@@ -659,7 +659,7 @@ public class DataTransferService {
                 // keep falling through to detailed error below
             }
         }
-        throw new SQLException("Khong the chuyen doi sang TIMESTAMP: " + value.getClass().getName());
+        throw new SQLException("Cannot convert to TIMESTAMP: " + (value == null ? "null" : value.getClass().getName()));
     }
 
     private static Date toSqlDate(Object value) throws SQLException {
@@ -674,7 +674,7 @@ public class DataTransferService {
             Timestamp ts = invokeTemporalGetter(value, "timestampValue", Timestamp.class);
             if (ts != null) return new Date(ts.getTime());
         }
-        throw new SQLException("Khong the chuyen doi sang DATE: " + value.getClass().getName());
+        throw new SQLException("Cannot convert to DATE: " + (value == null ? "null" : value.getClass().getName()));
     }
 
     private static Time toSqlTime(Object value) throws SQLException {
@@ -688,7 +688,7 @@ public class DataTransferService {
             Timestamp ts = invokeTemporalGetter(value, "timestampValue", Timestamp.class);
             if (ts != null) return new Time(ts.getTime());
         }
-        throw new SQLException("Khong the chuyen doi sang TIME: " + value.getClass().getName());
+        throw new SQLException("Cannot convert to TIME: " + (value == null ? "null" : value.getClass().getName()));
     }
 
     private static boolean isOracleSqlType(Object value) {
@@ -713,8 +713,8 @@ public class DataTransferService {
             return null;
         } catch (ReflectiveOperationException e) {
             throw new SQLException(
-                    "Khong the doc temporal value qua reflection method " + methodName
-                            + " tu " + value.getClass().getName(),
+                    "Cannot read temporal value via reflection method " + methodName
+                            + " from " + value.getClass().getName(),
                     e
             );
         }

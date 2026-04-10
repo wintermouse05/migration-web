@@ -6,7 +6,7 @@
     </header>
 
     <div ref="consoleRef" class="console">
-      <p v-if="!logs.length" class="empty">Chua co log nao. Bam bat dau de khoi chay migration.</p>
+      <p v-if="!logs.length" class="empty">No logs yet. Click Start migration to begin.</p>
       <div v-for="entry in logs" :key="entry.id" class="line" :class="entry.levelClass">
         <span class="time">[{{ entry.time }}]</span>
         <span class="message">{{ entry.message }}</span>

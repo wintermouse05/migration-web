@@ -14,8 +14,8 @@
     <section class="layout-grid">
       <DatabaseConfigCard
         title="Source Database"
-        badge="Nguon"
-        database-name-label="Ten DB / SID"
+        badge="Source"
+        database-name-label="DB Name / SID"
         v-model="sourceDb"
         :is-testing="sourceTestState.status === 'pending'"
         :test-state="sourceTestState"
@@ -30,8 +30,8 @@
 
       <DatabaseConfigCard
         title="Target Database"
-        badge="Dich"
-        database-name-label="Ten DB"
+        badge="Target"
+        database-name-label="DB Name"
         v-model="targetDb"
         :is-testing="targetTestState.status === 'pending'"
         :test-state="targetTestState"
@@ -57,7 +57,7 @@
     <section class="execution-shell">
       <div class="action-row">
         <button class="start-btn" :disabled="!canStartMigration" @click="startMigration">
-          {{ isMigrating ? 'Dang migration...' : 'Bat dau migration' }}
+          {{ isMigrating ? 'Migration in progress...' : 'Start migration' }}
         </button>
 
         <span class="helper">REST endpoint: {{ migrationStartUrl }}</span>
@@ -189,6 +189,7 @@ const canStartMigration = computed(() => {
 });
 
 const addLog = (message, level = 'info') => {
+  const normalizedMessage = message === null || message === undefined ? '' : String(message);
   const now = new Date();
   const pad = (value) => String(value).padStart(2, '0');
   const time = `${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
@@ -204,7 +205,7 @@ const addLog = (message, level = 'info') => {
   logs.value.push({
     id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
     time,
-    message,
+    message: normalizedMessage,
     levelClass
   });
 };
@@ -242,12 +243,12 @@ const fetchCurrentStatus = async (silent = false) => {
     if (response?.data) {
       handleStatusUpdate(response.data);
       if (!silent) {
-        addLog('Da dong bo trang thai hien tai tu server.');
+        addLog('Synchronized latest status from server.');
       }
     }
   } catch (error) {
     if (!silent) {
-      addLog(`Khong lay duoc trang thai hien tai: ${error.message}`, 'error');
+      addLog(`Unable to fetch current status: ${error.message}`, 'error');
     }
   }
 };
@@ -260,7 +261,7 @@ const connectWebSocket = () => {
 
   client.onConnect = () => {
     wsConnected.value = true;
-    addLog('Da ket noi WebSocket thanh cong.', 'success');
+    addLog('WebSocket connected successfully.', 'success');
     fetchCurrentStatus(true);
 
     client.subscribe(wsTopic, (message) => {
@@ -268,7 +269,7 @@ const connectWebSocket = () => {
         const payload = JSON.parse(message.body);
         handleStatusUpdate(payload);
       } catch (error) {
-        addLog(`Khong parse duoc thong diep WebSocket: ${error}`, 'error');
+        addLog(`Unable to parse WebSocket message: ${error}`, 'error');
       }
     });
   };
@@ -279,7 +280,7 @@ const connectWebSocket = () => {
 
   client.onWebSocketClose = () => {
     wsConnected.value = false;
-    addLog('WebSocket dong ket noi, dang thu ket noi lai...', 'error');
+    addLog('WebSocket disconnected. Reconnecting...', 'error');
   };
 
   client.activate();
@@ -294,7 +295,7 @@ const startMigration = async () => {
   isMigrating.value = true;
   progress.value = 0;
   logs.value = [];
-  addLog('Dang gui cau hinh migration len server...');
+  addLog('Sending migration configuration to server...');
 
   const payload = {
     source: { ...sourceDb.value },
@@ -308,10 +309,10 @@ const startMigration = async () => {
 
   try {
     const response = await axios.post(migrationStartUrl, payload);
-    addLog(response?.data?.message || 'Server da nhan yeu cau migration.');
+    addLog(response?.data?.message || 'Server accepted the migration request.');
   } catch (error) {
     const errorMessage = error?.response?.data?.message || error?.response?.data || error.message;
-    addLog(`Loi goi API: ${errorMessage}`, 'error');
+    addLog(`API request failed: ${errorMessage}`, 'error');
     isMigrating.value = false;
   }
 };
@@ -321,11 +322,11 @@ const testConnection = async (role) => {
   const state = role === 'source' ? sourceTestState : targetTestState;
   const roleLabel = role === 'source' ? 'Source' : 'Target';
 
-  state.value = { status: 'pending', message: 'Dang test...' };
+  state.value = { status: 'pending', message: 'Testing...' };
 
   try {
     const response = await axios.post(testConnectionUrl, { ...config });
-    const message = response?.data?.message || `Ket noi ${roleLabel} thanh cong.`;
+    const message = response?.data?.message || `${roleLabel} connection successful.`;
     state.value = { status: 'success', message };
     addLog(`[${roleLabel}] ${message}`, 'success');
   } catch (error) {
@@ -333,7 +334,7 @@ const testConnection = async (role) => {
       error?.response?.data?.message ||
       error?.response?.data ||
       error?.message ||
-      `Ket noi ${roleLabel} that bai.`;
+      `${roleLabel} connection failed.`;
     state.value = { status: 'error', message: String(message) };
     addLog(`[${roleLabel}] ${message}`, 'error');
   }
@@ -362,10 +363,10 @@ const fetchSavedCredentials = async (silent = false) => {
     const payload = Array.isArray(response?.data) ? response.data : [];
     savedCredentials.value = payload;
     if (!silent) {
-      addLog(`Da tai ${payload.length} credential da luu.`, 'success');
+      addLog(`Loaded ${payload.length} saved credentials.`, 'success');
     }
   } catch (error) {
-    const message = error?.response?.data?.message || error?.message || 'Khong tai duoc credentials da luu.';
+    const message = error?.response?.data?.message || error?.message || 'Unable to load saved credentials.';
     if (!silent) {
       addLog(message, 'error');
     }
@@ -376,7 +377,7 @@ const saveCredential = async (role, payload) => {
   const state = role === 'source' ? sourceSaveState : targetSaveState;
   const roleLabel = role === 'source' ? 'Source' : 'Target';
 
-  state.value = { status: 'pending', message: 'Dang luu...' };
+  state.value = { status: 'pending', message: 'Saving...' };
 
   try {
     const response = await axios.post(credentialStorageUrl, {
@@ -387,7 +388,7 @@ const saveCredential = async (role, payload) => {
     const saved = response?.data;
     state.value = {
       status: 'success',
-      message: `Da luu credential "${saved?.displayName || payload.name}".`
+      message: `Saved credential "${saved?.displayName || payload.name}".`
     };
 
     if (role === 'source') {
@@ -397,13 +398,13 @@ const saveCredential = async (role, payload) => {
     }
 
     await fetchSavedCredentials(true);
-    addLog(`[${roleLabel}] Da luu credential de tai su dung.`, 'success');
+    addLog(`[${roleLabel}] Credential saved for reuse.`, 'success');
   } catch (error) {
     const message =
       error?.response?.data?.message ||
       error?.response?.data ||
       error?.message ||
-      'Khong the luu credential.';
+      'Unable to save credential.';
 
     state.value = { status: 'error', message: String(message) };
     addLog(`[${roleLabel}] ${message}`, 'error');
@@ -425,13 +426,13 @@ const selectSavedCredential = (role, credentialId) => {
     (item) => normalizeCredentialId(item.id) === normalizedCredentialId
   );
   if (!selected) {
-    addLog('Khong tim thay credential da chon.', 'error');
+    addLog('Selected credential was not found.', 'error');
     return;
   }
 
   const config = normalizeDatabaseConfig(selected.databaseConfig);
   if (!config) {
-    addLog('Credential da chon khong hop le.', 'error');
+    addLog('Selected credential is invalid.', 'error');
     return;
   }
 
@@ -443,7 +444,7 @@ const selectSavedCredential = (role, credentialId) => {
     selectedTargetCredentialId.value = normalizeCredentialId(selected.id);
   }
 
-  addLog(`[${role === 'source' ? 'Source' : 'Target'}] Da nap credential "${selected.displayName}".`, 'success');
+  addLog(`[${role === 'source' ? 'Source' : 'Target'}] Loaded credential "${selected.displayName}".`, 'success');
 };
 
 onMounted(() => {

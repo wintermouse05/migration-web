@@ -32,7 +32,7 @@ public class MigrationController {
 
         // 1. (Tùy chọn) Validate cấu hình đầu vào ở đây trước khi chạy
         if (request.getSource() == null || request.getTarget() == null) {
-            return ResponseEntity.badRequest().body("Thiếu thông tin cấu hình Source hoặc Target.");
+            return ResponseEntity.badRequest().body("Missing Source or Target configuration.");
         }
 
         // 2. Kích hoạt tiến trình chạy ngầm
@@ -41,7 +41,7 @@ public class MigrationController {
         // 3. Phản hồi ngay lập tức cho Frontend biết là Job đã được tiếp nhận
         return ResponseEntity.ok(Map.of(
                 "status", "ACCEPTED",
-                "message", "Tiến trình migration đã được đưa vào hàng đợi nền. Vui lòng kết nối WebSocket để theo dõi."
+            "message", "Migration has been queued in the background. Connect WebSocket to monitor progress."
         ));
     }
 
@@ -73,10 +73,10 @@ public class MigrationController {
     @PostMapping("/credentials")
     public ResponseEntity<?> saveCredential(@RequestBody SavedCredentialRequest request) {
         if (request == null || request.getConfig() == null) {
-            return ResponseEntity.badRequest().body(Map.of("message", "Thieu thong tin credential de luu."));
+            return ResponseEntity.badRequest().body(Map.of("message", "Missing credential payload for saving."));
         }
         if (request.getName() == null || request.getName().isBlank()) {
-            return ResponseEntity.badRequest().body(Map.of("message", "Ten goi y de luu credential la bat buoc."));
+            return ResponseEntity.badRequest().body(Map.of("message", "Credential name is required."));
         }
 
         try {
