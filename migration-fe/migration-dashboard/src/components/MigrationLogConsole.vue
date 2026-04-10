@@ -40,16 +40,17 @@ watch(
 
 <style scoped>
 .console-wrap {
-  background: #10161f;
+  background: #1e2a36;
+  border: 1px solid #0f1821;
   border-radius: 14px;
-  box-shadow: 0 18px 45px rgba(16, 22, 31, 0.24);
-  color: #b7c2d1;
+  box-shadow: 0 12px 24px #9b8667;
+  color: #c8d3e0;
   overflow: hidden;
 }
 
 header {
   align-items: center;
-  background: #181f2b;
+  background: #13202c;
   display: flex;
   justify-content: space-between;
   padding: 10px 14px;
@@ -63,7 +64,7 @@ h2 {
 }
 
 .count {
-  color: #8ca4c5;
+  color: #9db4ca;
   font-size: 0.8rem;
 }
 
@@ -76,7 +77,7 @@ h2 {
 }
 
 .empty {
-  color: #8696ac;
+  color: #96a8bc;
   margin: 0;
 }
 

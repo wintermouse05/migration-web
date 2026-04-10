@@ -38,8 +38,8 @@ const normalizedProgress = computed(() => {
 
 <style scoped>
 .progress-wrap {
-  background: linear-gradient(180deg, #fff 0%, #f8f7f3 100%);
-  border: 1px solid #e8e2d8;
+  background: linear-gradient(180deg, var(--surface) 0%, var(--surface-alt) 100%);
+  border: 1px solid var(--line);
   border-radius: 14px;
   margin: 14px 0;
   padding: 13px;
@@ -52,14 +52,14 @@ const normalizedProgress = computed(() => {
 }
 
 .progress-track {
-  background: #d8dfe7;
+  background: #d4c3aa;
   border-radius: 999px;
   height: 14px;
   overflow: hidden;
 }
 
 .progress-fill {
-  background: linear-gradient(95deg, #1e9878 0%, #2d7ef7 100%);
+  background: linear-gradient(95deg, var(--primary) 0%, var(--accent) 100%);
   height: 100%;
   transition: width 0.35s ease;
 }

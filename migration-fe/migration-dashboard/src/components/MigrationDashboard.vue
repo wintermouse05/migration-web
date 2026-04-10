@@ -4,10 +4,10 @@
       <p class="eyebrow">DATABASE TOOLING</p>
       <h1>Migration Database Dashboard</h1>
       <p class="subtitle">
-        Cau hinh ket noi DB, gui lenh migration qua REST API va theo doi log theo thoi gian thuc bang WebSocket.
+        Migrate Data and Structure between Databases with Ease. Monitor Progress, View Logs, and Manage Credentials in One Place.
       </p>
       <div class="status-pill" :class="{ connected: wsConnected }">
-        {{ wsConnected ? 'WebSocket dang ket noi' : 'WebSocket dang ngat ket noi' }}
+        {{ wsConnected ? 'WebSocket Connected' : 'WebSocket Disconnected' }}
       </div>
     </header>
 
@@ -45,23 +45,27 @@
       />
     </section>
 
-    <MigrationOptions
-      v-model:migration-mode="migrationMode"
-      v-model:options="options"
-      v-model:retry="retry"
-      v-model:resume="resume"
-    />
-
-    <section class="action-row">
-      <button class="start-btn" :disabled="!canStartMigration" @click="startMigration">
-        {{ isMigrating ? 'Dang migration...' : 'Bat dau migration' }}
-      </button>
-
-      <span class="helper">REST endpoint: {{ migrationStartUrl }}</span>
+    <section class="options-shell">
+      <MigrationOptions
+        v-model:migration-mode="migrationMode"
+        v-model:options="options"
+        v-model:retry="retry"
+        v-model:resume="resume"
+      />
     </section>
 
-    <MigrationProgress :progress="progress" :is-migrating="isMigrating" />
-    <MigrationLogConsole :logs="logs" />
+    <section class="execution-shell">
+      <div class="action-row">
+        <button class="start-btn" :disabled="!canStartMigration" @click="startMigration">
+          {{ isMigrating ? 'Dang migration...' : 'Bat dau migration' }}
+        </button>
+
+        <span class="helper">REST endpoint: {{ migrationStartUrl }}</span>
+      </div>
+
+      <MigrationProgress :progress="progress" :is-migrating="isMigrating" />
+      <MigrationLogConsole :logs="logs" />
+    </section>
   </div>
 </template>
 
@@ -119,6 +123,10 @@ const options = ref({
   limit: 0,
   includeTablesCsv: '',
   excludeTablesCsv: '',
+  migrateSequences: false,
+  migrateIndexes: false,
+  migrateFunctions: false,
+  migrateTriggers: false,
   // View migration options
   migrateViews: false,
   replaceExistingViews: false,
@@ -146,6 +154,13 @@ const targetSaveState = ref({ status: 'idle', message: '' });
 const savedCredentials = ref([]);
 const selectedSourceCredentialId = ref('');
 const selectedTargetCredentialId = ref('');
+
+const normalizeCredentialId = (value) => {
+  if (value === null || value === undefined) {
+    return '';
+  }
+  return String(value);
+};
 
 const hasJdbcUrl = (config) => {
   return Boolean(config?.jdbcUrl && String(config.jdbcUrl).trim());
@@ -376,9 +391,9 @@ const saveCredential = async (role, payload) => {
     };
 
     if (role === 'source') {
-      selectedSourceCredentialId.value = saved?.id || '';
+      selectedSourceCredentialId.value = normalizeCredentialId(saved?.id);
     } else {
-      selectedTargetCredentialId.value = saved?.id || '';
+      selectedTargetCredentialId.value = normalizeCredentialId(saved?.id);
     }
 
     await fetchSavedCredentials(true);
@@ -396,7 +411,8 @@ const saveCredential = async (role, payload) => {
 };
 
 const selectSavedCredential = (role, credentialId) => {
-  if (!credentialId) {
+  const normalizedCredentialId = normalizeCredentialId(credentialId);
+  if (!normalizedCredentialId) {
     if (role === 'source') {
       selectedSourceCredentialId.value = '';
     } else {
@@ -405,7 +421,9 @@ const selectSavedCredential = (role, credentialId) => {
     return;
   }
 
-  const selected = savedCredentials.value.find((item) => Number(item.id) === Number(credentialId));
+  const selected = savedCredentials.value.find(
+    (item) => normalizeCredentialId(item.id) === normalizedCredentialId
+  );
   if (!selected) {
     addLog('Khong tim thay credential da chon.', 'error');
     return;
@@ -419,10 +437,10 @@ const selectSavedCredential = (role, credentialId) => {
 
   if (role === 'source') {
     sourceDb.value = { ...config };
-    selectedSourceCredentialId.value = selected.id;
+    selectedSourceCredentialId.value = normalizeCredentialId(selected.id);
   } else {
     targetDb.value = { ...config };
-    selectedTargetCredentialId.value = selected.id;
+    selectedTargetCredentialId.value = normalizeCredentialId(selected.id);
   }
 
   addLog(`[${role === 'source' ? 'Source' : 'Target'}] Da nap credential "${selected.displayName}".`, 'success');
@@ -444,7 +462,7 @@ onUnmounted(() => {
 <style scoped>
 .dashboard {
   margin: 0 auto;
-  max-width: 1080px;
+  max-width: 1240px;
 }
 
 .hero {
@@ -453,7 +471,7 @@ onUnmounted(() => {
 }
 
 .eyebrow {
-  color: #1e9878;
+  color: var(--accent);
   font-size: 0.76rem;
   font-weight: 800;
   letter-spacing: 0.11em;
@@ -468,16 +486,16 @@ h1 {
 }
 
 .subtitle {
-  color: #4b6070;
+  color: var(--ink-soft);
   line-height: 1.5;
   margin: 0;
   max-width: 760px;
 }
 
 .status-pill {
-  background: #f6d8d8;
+  background: var(--error-bg);
   border-radius: 999px;
-  color: #953535;
+  color: var(--error-text);
   display: inline-flex;
   font-size: 0.81rem;
   font-weight: 700;
@@ -486,51 +504,69 @@ h1 {
 }
 
 .status-pill.connected {
-  background: #dbf3e8;
-  color: #16674d;
+  background: var(--ok-bg);
+  color: var(--ok-text);
 }
 
 .layout-grid {
   display: grid;
+  align-items: stretch;
   gap: 14px;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  margin-bottom: 14px;
+  margin-bottom: 12px;
+}
+
+.options-shell {
+  margin-bottom: 12px;
+}
+
+.execution-shell {
+  background: linear-gradient(180deg, var(--surface) 0%, var(--surface-alt) 100%);
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  box-shadow: 0 12px 28px var(--shadow-soft);
+  padding: 14px;
 }
 
 .action-row {
   align-items: center;
   display: flex;
+  justify-content: space-between;
   flex-wrap: wrap;
   gap: 12px;
-  margin: 16px 0 8px;
+  margin: 2px 0 10px;
 }
 
 .start-btn {
-  background: linear-gradient(102deg, #1f8f72, #226ad8);
+  background: linear-gradient(102deg, #e56d2e, #c94b18);
   border: 0;
   border-radius: 12px;
   color: #fff;
   cursor: pointer;
   font-family: 'Space Grotesk', sans-serif;
-  font-size: 1rem;
+  font-size: 0.98rem;
   font-weight: 700;
-  padding: 11px 16px;
+  letter-spacing: 0.02em;
+  min-height: 46px;
+  min-width: 228px;
+  padding: 10px 18px;
   transition: transform 0.2s ease, box-shadow 0.2s ease;
 }
 
 .start-btn:hover:enabled {
-  box-shadow: 0 12px 24px rgba(31, 143, 114, 0.2);
+  box-shadow: 0 10px 20px #c38f62;
   transform: translateY(-1px);
 }
 
 .start-btn:disabled {
-  background: #a4acb5;
+  background: #9a8870;
   cursor: not-allowed;
 }
 
 .helper {
-  color: #5c6e7d;
-  font-size: 0.84rem;
+  color: var(--ink-soft);
+  font-size: 0.82rem;
+  font-weight: 700;
 }
 
 @keyframes rise-in {
@@ -547,6 +583,30 @@ h1 {
 @media (max-width: 900px) {
   .layout-grid {
     grid-template-columns: 1fr;
+  }
+
+  .execution-shell {
+    padding: 12px;
+  }
+
+  .start-btn {
+    width: 100%;
+  }
+}
+
+@media (max-width: 1100px) {
+  .action-row {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .helper {
+    width: 100%;
+  }
+
+  .start-btn {
+    min-width: 0;
   }
 }
 </style>

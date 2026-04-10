@@ -5,38 +5,33 @@
       <span class="card-badge">{{ badge }}</span>
     </header>
 
-    <div class="card-actions">
-      <button class="test-btn" type="button" :disabled="isTesting" @click="emit('test-connection')">
-        {{ isTesting ? 'Dang test...' : 'Test connection' }}
-      </button>
-      <span v-if="testState?.message" :class="['test-message', `test-${testState.status || 'idle'}`]">
-        {{ testState.message }}
-      </span>
-    </div>
+    <section class="credential-panel">
+      <p class="panel-title">Credential nhanh</p>
 
-    <div class="credential-tools">
-      <label class="field">
-        <span>Chon cau hinh da luu</span>
-        <select :value="selectedSavedCredentialId" @change="onSelectSavedCredential">
-          <option value="">-- Chon mot cau hinh da luu --</option>
-          <option
-            v-for="credential in savedCredentials"
-            :key="credential.id"
-            :value="credential.id"
-          >
-            {{ renderSavedCredentialOption(credential) }}
-          </option>
-        </select>
-      </label>
+      <div class="credential-grid">
+        <label class="credential-field">
+          <span>Chon cau hinh da luu</span>
+          <select :value="selectedSavedCredentialId" @change="onSelectSavedCredential">
+            <option value="">-- Chon mot cau hinh da luu --</option>
+            <option
+              v-for="credential in savedCredentials"
+              :key="credential.id"
+              :value="credential.id"
+            >
+              {{ renderSavedCredentialOption(credential) }}
+            </option>
+          </select>
+        </label>
 
-      <label class="field">
-        <span>Ten de luu nhanh (tu chon)</span>
-        <input
-          v-model.trim="saveCredentialName"
-          type="text"
-          placeholder="Vi du: Oracle QA, PG Local"
-        />
-      </label>
+        <label class="credential-field">
+          <span>Ten de luu nhanh (tu chon)</span>
+          <input
+            v-model.trim="saveCredentialName"
+            type="text"
+            placeholder="Vi du: Oracle QA, PG Local"
+          />
+        </label>
+      </div>
 
       <div class="save-row">
         <button class="save-btn" type="button" :disabled="isSavingCredential" @click="onSaveCredential">
@@ -54,10 +49,10 @@
           {{ saveState.message }}
         </span>
       </div>
-    </div>
+    </section>
 
     <div class="form-grid">
-      <label class="field">
+      <label class="field-row">
         <span>Loai co so du lieu</span>
         <select v-model="localConfig.type">
           <option value="ORACLE">Oracle</option>
@@ -65,7 +60,7 @@
         </select>
       </label>
 
-      <label class="field">
+      <label class="field-row">
         <span>JDBC URL (uu tien)</span>
         <input
           v-model.trim="localConfig.jdbcUrl"
@@ -75,35 +70,44 @@
         <small class="field-note">Neu co URL, he thong se uu tien dung URL thay vi Host/Port/DB Name.</small>
       </label>
 
-      <label class="field">
+      <label class="field-row">
         <span>Host</span>
         <input v-model.trim="localConfig.host" type="text" placeholder="localhost" />
       </label>
 
-      <label class="field">
+      <label class="field-row">
         <span>Port</span>
         <input v-model.number="localConfig.port" type="number" min="1" />
       </label>
 
-      <label class="field">
+      <label class="field-row">
         <span>{{ databaseNameLabel }}</span>
         <input v-model.trim="localConfig.databaseName" type="text" />
       </label>
 
-      <label class="field">
+      <label class="field-row">
         <span>Schema (tuy chon)</span>
         <input v-model.trim="localConfig.schemaName" type="text" placeholder="public, scott, ..." />
       </label>
 
-      <label class="field">
+      <label class="field-row">
         <span>Username</span>
         <input v-model.trim="localConfig.username" type="text" autocomplete="username" />
       </label>
 
-      <label class="field">
+      <label class="field-row">
         <span>Password</span>
         <input v-model="localConfig.password" type="password" autocomplete="current-password" />
       </label>
+    </div>
+
+    <div class="test-action-bar">
+      <span v-if="testState?.message" :class="['test-message', `test-${testState.status || 'idle'}`]">
+        {{ testState.message }}
+      </span>
+      <button class="test-btn" type="button" :disabled="isTesting" @click="emit('test-connection')">
+        {{ isTesting ? 'Dang test...' : 'Test connection' }}
+      </button>
     </div>
   </section>
 </template>
@@ -205,7 +209,7 @@ const onSelectSavedCredential = (event) => {
     emit('select-saved-credential', null);
     return;
   }
-  emit('select-saved-credential', Number(selectedValue));
+  emit('select-saved-credential', selectedValue);
 };
 
 const renderSavedCredentialOption = (credential) => {
@@ -224,31 +228,66 @@ const renderSavedCredentialOption = (credential) => {
 
 <style scoped>
 .card {
-  background: #ffffff;
+  background: var(--surface);
   border-radius: 18px;
-  border: 1px solid #e8e2d8;
+  border: 2px solid #a7865d;
+  box-shadow: 0 12px 28px var(--shadow-soft);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
   padding: 18px;
-  box-shadow: 0 18px 45px rgba(44, 53, 74, 0.08);
 }
 
 .card-header {
   align-items: center;
+  border-bottom: 2px solid #ccb089;
   display: flex;
   justify-content: space-between;
+  padding-bottom: 10px;
+}
+
+.test-action-bar {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  justify-content: space-between;
+  margin-top: 2px;
+}
+
+.credential-panel {
+  background: #f9edd8;
+  border: 1px solid #d5b790;
+  border-radius: 12px;
+  padding: 10px;
+}
+
+.panel-title {
+  color: #6f532f;
+  font-size: 0.78rem;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  margin: 0 0 8px;
+  text-transform: uppercase;
+}
+
+.credential-grid {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   margin-bottom: 10px;
 }
 
-.card-actions {
-  align-items: center;
-  display: flex;
-  gap: 10px;
-  margin-bottom: 14px;
+.credential-field {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
 }
 
-.credential-tools {
-  display: grid;
-  gap: 10px;
-  margin-bottom: 14px;
+.credential-field span {
+  color: var(--ink-soft);
+  font-size: 0.82rem;
+  font-weight: 700;
 }
 
 .save-row {
@@ -259,10 +298,10 @@ const renderSavedCredentialOption = (credential) => {
 }
 
 .test-btn {
-  background: #eef7ff;
-  border: 1px solid #bfd6f5;
+  background: var(--accent-soft);
+  border: 1px solid #8eb5d4;
   border-radius: 9px;
-  color: #1f5ea8;
+  color: var(--accent);
   cursor: pointer;
   font-family: inherit;
   font-size: 0.82rem;
@@ -272,14 +311,15 @@ const renderSavedCredentialOption = (credential) => {
 
 .test-btn:disabled {
   cursor: not-allowed;
-  opacity: 0.7;
+  background: #c4cfda;
+  color: #5d6a76;
 }
 
 .save-btn {
-  background: #fff8e8;
-  border: 1px solid #e8cf97;
+  background: #f6e5cc;
+  border: 1px solid #cda77c;
   border-radius: 9px;
-  color: #96620d;
+  color: #7c4b13;
   cursor: pointer;
   font-family: inherit;
   font-size: 0.82rem;
@@ -289,7 +329,8 @@ const renderSavedCredentialOption = (credential) => {
 
 .save-btn:disabled {
   cursor: not-allowed;
-  opacity: 0.7;
+  background: #d7cab7;
+  color: #756555;
 }
 
 .save-message {
@@ -298,18 +339,18 @@ const renderSavedCredentialOption = (credential) => {
 }
 
 .save-success {
-  color: #1b7a4f;
+  color: var(--ok-text);
 }
 
 .save-error {
-  color: #b03535;
+  color: var(--error-text);
   font-size: 0.8rem;
   font-weight: 700;
 }
 
 .save-pending,
 .save-idle {
-  color: #5b6977;
+  color: var(--ink-soft);
 }
 
 .test-message {
@@ -318,16 +359,16 @@ const renderSavedCredentialOption = (credential) => {
 }
 
 .test-success {
-  color: #1b7a4f;
+  color: var(--ok-text);
 }
 
 .test-error {
-  color: #b03535;
+  color: var(--error-text);
 }
 
 .test-pending,
 .test-idle {
-  color: #5b6977;
+  color: var(--ink-soft);
 }
 
 .card-header h2 {
@@ -337,9 +378,10 @@ const renderSavedCredentialOption = (credential) => {
 }
 
 .card-badge {
-  background: #edf4ff;
+  background: var(--accent-soft);
+  border: 1px solid #8eb5d4;
   border-radius: 999px;
-  color: #2d7ef7;
+  color: var(--accent);
   font-size: 0.75rem;
   font-weight: 700;
   letter-spacing: 0.06em;
@@ -349,43 +391,85 @@ const renderSavedCredentialOption = (credential) => {
 
 .form-grid {
   display: grid;
-  gap: 11px;
+  gap: 9px;
 }
 
-.field {
+.field-row {
+  align-items: start;
   display: grid;
-  gap: 6px;
+  gap: 8px;
+  grid-template-columns: minmax(170px, 38%) minmax(0, 1fr);
 }
 
-.field span {
-  color: #415665;
-  font-size: 0.84rem;
+.field-row span {
+  color: var(--ink-soft);
+  font-size: 0.82rem;
   font-weight: 700;
+  line-height: 1.35;
+  padding-top: 8px;
 }
 
 .field-note {
-  color: #6e7d89;
+  color: #6c5c47;
   font-size: 0.76rem;
+  grid-column: 2;
   line-height: 1.35;
+  margin-top: -2px;
 }
 
-.field input,
-.field select {
+.field-row input,
+.field-row select,
+.credential-field input,
+.credential-field select {
   appearance: none;
-  background: #fdfbf8;
-  border: 1px solid #d9d5cd;
+  background: #fffaf2;
+  border: 1px solid #ccb089;
   border-radius: 10px;
-  color: #1f2b36;
+  color: var(--ink);
   font-family: inherit;
   font-size: 0.93rem;
   outline: none;
-  padding: 10px 11px;
+  padding: 9px 11px;
   transition: border-color 0.2s ease, box-shadow 0.2s ease;
 }
 
-.field input:focus,
-.field select:focus {
-  border-color: #2d7ef7;
-  box-shadow: 0 0 0 4px rgba(45, 126, 247, 0.14);
+.credential-field input,
+.credential-field select {
+  min-width: 0;
+  width: 100%;
+}
+
+.field-row input:focus,
+.field-row select:focus,
+.credential-field input:focus,
+.credential-field select:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px #c7dded;
+}
+
+@media (max-width: 1180px) {
+  .credential-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 960px) {
+  .field-row {
+    grid-template-columns: 1fr;
+    gap: 6px;
+  }
+
+  .field-row span {
+    padding-top: 0;
+  }
+
+  .field-note {
+    grid-column: auto;
+    margin-top: 0;
+  }
+
+  .test-action-bar {
+    justify-content: flex-end;
+  }
 }
 </style>
