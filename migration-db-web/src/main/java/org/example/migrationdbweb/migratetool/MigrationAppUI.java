@@ -337,6 +337,26 @@ public class MigrationAppUI extends JFrame {
         }
     }
 
+    private void bindDefaultPortByDbType(JComboBox<String> dbTypeCombo, JTextField portField) {
+        if (dbTypeCombo == null || portField == null) {
+            return;
+        }
+
+        dbTypeCombo.addActionListener(e -> {
+            Object selected = dbTypeCombo.getSelectedItem();
+            if (selected == null) {
+                return;
+            }
+
+            String dbType = String.valueOf(selected);
+            if ("Oracle".equalsIgnoreCase(dbType)) {
+                portField.setText("1521");
+            } else if ("PostgreSQL".equalsIgnoreCase(dbType)) {
+                portField.setText("5432");
+            }
+        });
+    }
+
     /**
      * Tạo panel cấu hình kết nối DB (Source hoặc Target).
      * Thêm trường Schema override.
@@ -346,6 +366,7 @@ public class MigrationAppUI extends JFrame {
         panel.setBorder(createDbSectionBorder(title));
 
         JComboBox<String> dbTypeCombo = new JComboBox<>(new String[]{"Oracle", "PostgreSQL"});
+        dbTypeCombo.setSelectedItem(isSource ? "Oracle" : "PostgreSQL");
         JTextField urlField = new JTextField();
         JTextField hostField = new JTextField(isSource ? "localhost" : "127.0.0.1");
         JTextField portField = new JTextField(isSource ? "1521" : "5432");
@@ -367,6 +388,8 @@ public class MigrationAppUI extends JFrame {
             targetSchemaField = schemaField;
             targetUrlField = urlField;
         }
+
+        bindDefaultPortByDbType(dbTypeCombo, portField);
 
         JPanel formPanel = new JPanel();
         formPanel.setLayout(new javax.swing.BoxLayout(formPanel, javax.swing.BoxLayout.Y_AXIS));

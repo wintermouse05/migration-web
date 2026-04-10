@@ -54,7 +54,7 @@
     <div class="form-grid">
       <label class="field-row">
         <span>Database type</span>
-        <select v-model="localConfig.type">
+        <select v-model="localConfig.type" @change="onDatabaseTypeChange">
           <option value="ORACLE">Oracle</option>
           <option value="POSTGRESQL">PostgreSQL</option>
         </select>
@@ -210,6 +210,14 @@ const onSelectSavedCredential = (event) => {
     return;
   }
   emit('select-saved-credential', selectedValue);
+};
+
+const onDatabaseTypeChange = () => {
+  if (localConfig.type === 'ORACLE') {
+    localConfig.port = 1521;
+  } else if (localConfig.type === 'POSTGRESQL') {
+    localConfig.port = 5432;
+  }
 };
 
 const renderSavedCredentialOption = (credential) => {
