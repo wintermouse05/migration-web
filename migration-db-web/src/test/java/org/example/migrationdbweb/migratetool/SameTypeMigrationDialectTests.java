@@ -92,6 +92,19 @@ class SameTypeMigrationDialectTests {
     }
 
     @Test
+    void shouldStripOracleTableSharingClauseForSameTypeMigration() {
+        TableDefinition table = new TableDefinition("EAT_ATENAKIHON_MASKING");
+        table.setSourceSchema("SCOTT");
+        table.setTargetSchema("SCOTT2");
+        table.setDdlText("CREATE TABLE \"SCOTT\".\"EAT_ATENAKIHON_MASKING\" SHARING=METADATA (\"ATENA_NO\" VARCHAR2(15 CHAR) NOT NULL ENABLE)");
+
+        String sql = new OracleDialect().buildCreateTableSql(table);
+
+        assertTrue(sql.contains("\"SCOTT2\".\"EAT_ATENAKIHON_MASKING\""));
+        assertFalse(sql.toUpperCase().contains("SHARING="));
+    }
+
+    @Test
     void shouldBuildOracleViewCreateSqlFromSelectClauseForSameTypeMigration() {
         ViewDefinition view = ViewDefinition.builder()
                 .viewName("V_CUSTOMER_ORDERS")

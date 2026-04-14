@@ -11,9 +11,10 @@ public class ColumnDefinition {
     private int scale;
     private boolean isNullable;
     private boolean isAutoIncrement;
+    private boolean charLengthSemantics;
 
     public ColumnDefinition(String name, int jdbcType, String typeName, int size, boolean isNullable, boolean isAutoIncrement) {
-        this(name, jdbcType, typeName, size, 0, isNullable, isAutoIncrement);
+        this(name, jdbcType, typeName, size, 0, isNullable, isAutoIncrement, false);
     }
 
     public ColumnDefinition(
@@ -25,6 +26,19 @@ public class ColumnDefinition {
             boolean isNullable,
             boolean isAutoIncrement
     ) {
+        this(name, jdbcType, typeName, size, scale, isNullable, isAutoIncrement, false);
+    }
+
+    public ColumnDefinition(
+            String name,
+            int jdbcType,
+            String typeName,
+            int size,
+            int scale,
+            boolean isNullable,
+            boolean isAutoIncrement,
+            boolean charLengthSemantics
+    ) {
         this.name = name;
         this.jdbcType = jdbcType;
         this.typeName = typeName;
@@ -32,6 +46,7 @@ public class ColumnDefinition {
         this.scale = scale;
         this.isNullable = isNullable;
         this.isAutoIncrement = isAutoIncrement;
+        this.charLengthSemantics = charLengthSemantics;
     }
 
 }

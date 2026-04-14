@@ -116,6 +116,9 @@ public abstract class DirectionalMigration {
                     includeTables,
                     excludeTables
                 );
+                for (TableDefinition table : allTables) {
+                    table.setTargetSchema(targetSchema);
+                }
 
                 // ── Extract Sequences ───────────────────────────────────────
                 if (MIGRATION_MIGRATE_SEQUENCES) {
@@ -195,6 +198,10 @@ public abstract class DirectionalMigration {
                     try {
                         allViews = metadataExtractor.extractViewDefinitionsWithDependencySort(
                                 sourceConn, sourceSchema, sourceConfig.getType());
+                        for (ViewDefinition view : allViews) {
+                            view.setSourceSchema(sourceSchema);
+                            view.setTargetSchema(targetSchema);
+                        }
                         System.out.println("Tim thay " + allViews.size() + " views (da sort theo dependency).");
                     } catch (IllegalStateException e) {
                         System.err.println("WARN: Circular view dependency: " + e.getMessage() + ". Bo qua views.");
@@ -596,7 +603,7 @@ public abstract class DirectionalMigration {
             runCreateTablesPhase(targetConn, allTables, targetDialect, skipExistingTables);
 
             // ── PHASE 2: Migrate Data ───────────────────────────────
-            SqlGenerator sqlGenerator = new SqlGenerator(sourceDialect, targetDialect);
+            SqlGenerator sqlGenerator = new SqlGenerator(sourceDialect, targetDialect, null, targetSchema);
             DataTransferService transferService = new DataTransferService(sqlGenerator);
             for (TableDefinition table : allTables) {
                 if (checkpointStore != null && checkpointStore.isTableCompleted(table.getTableName())) {
@@ -961,6 +968,10 @@ public abstract class DirectionalMigration {
 
         try (Statement statement = targetConn.createStatement()) {
             for (TableDefinition table : allTables) {
+                boolean rawOracleTableDdlMode = targetDialect instanceof OracleDialect
+                        && table.getDdlText() != null
+                        && !table.getDdlText().isBlank();
+
                 String createSql = normalizeSqlForJdbc(targetDialect.buildCreateTableSql(table));
                 try {
                     statement.execute(createSql);
@@ -970,10 +981,44 @@ public abstract class DirectionalMigration {
                         System.out.println("Skipped existing table: " + table.getTableName());
                         continue;
                     }
+                    if (rawOracleTableDdlMode && isOracleRawTableDdlIncompatibleError(e)) {
+                        System.err.println("[WARN] Raw Oracle DDL incompatible for table "
+                                + table.getTableName() + ", fallback to generated DDL. Reason: " + e.getMessage());
+
+                        String fallbackCreateSql = buildOracleGeneratedCreateTableSql(table, targetDialect);
+                        try {
+                            statement.execute(fallbackCreateSql);
+                            System.out.println("Created table (fallback generated DDL): " + table.getTableName());
+                            continue;
+                        } catch (SQLException fallbackEx) {
+                            System.err.println("[DDL-DEBUG] RAW CREATE SQL: " + abbreviateSqlForLog(createSql));
+                            System.err.println("[DDL-DEBUG] FALLBACK CREATE SQL: " + abbreviateSqlForLog(fallbackCreateSql));
+                            throw fallbackEx;
+                        }
+                    }
+                    System.err.println("[DDL-DEBUG] CREATE TABLE SQL: " + abbreviateSqlForLog(createSql));
                     throw e;
                 }
             }
         }
+    }
+
+    private static String buildOracleGeneratedCreateTableSql(TableDefinition table, SqlDialect targetDialect) {
+        TableDefinition generated = new TableDefinition(table.getTableName());
+        generated.setSourceSchema(table.getSourceSchema());
+        generated.setTargetSchema(table.getTargetSchema());
+
+        for (ColumnDefinition column : table.getColumns()) {
+            generated.addColumn(column);
+        }
+        for (String pk : table.getPrimaryKeys()) {
+            generated.addPrimaryKey(pk);
+        }
+        for (ForeignKeyDefinition fk : table.getForeignKeys()) {
+            generated.addForeignKey(fk);
+        }
+
+        return normalizeSqlForJdbc(targetDialect.buildCreateTableSql(generated));
     }
 
     private static void dropTargetTablesPhase(
@@ -1086,6 +1131,26 @@ public abstract class DirectionalMigration {
         return "42P07".equals(sqlState)
                 || message.contains("already exists")
                 || message.contains("ora-00955");
+    }
+
+    private static boolean isOracleRawTableDdlIncompatibleError(SQLException e) {
+        String message = e.getMessage() == null ? "" : e.getMessage().toLowerCase(Locale.ROOT);
+        return message.contains("ora-00922")
+                || message.contains("ora-00933")
+                || message.contains("ora-00907")
+                || message.contains("ora-00904")
+                || message.contains("ora-65021");
+    }
+
+    private static String abbreviateSqlForLog(String sql) {
+        if (sql == null) {
+            return "";
+        }
+        String compact = sql.replace('\n', ' ').replace('\r', ' ').trim();
+        if (compact.length() <= 400) {
+            return compact;
+        }
+        return compact.substring(0, 400) + "...";
     }
 
     private static boolean isTableNotExistsError(SQLException e) {

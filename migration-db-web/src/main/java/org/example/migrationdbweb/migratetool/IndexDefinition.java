@@ -2,6 +2,7 @@ package org.example.migrationdbweb.migratetool;
 
 import java.util.ArrayList;
 import java.util.List;
+
 import lombok.Builder;
 import lombok.Data;
 
@@ -75,6 +76,9 @@ public class IndexDefinition {
 
     /** Schema đích — thay thế sourceSchema trong DDL */
     private String targetSchema;
+
+    /** Full DDL text gốc của index (DBMS_METADATA / pg metadata). */
+    private String ddlText;
 
     /** Cờ: index có được tạo bởi system (FK index, implicit) hay user */
     private boolean systemIndex;

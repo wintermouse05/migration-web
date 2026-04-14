@@ -60,6 +60,9 @@ public class SequenceDefinition {
     /** Schema đích — thay thế sourceSchema trong DDL */
     private String targetSchema;
 
+    /** Full DDL text gốc của sequence (DBMS_METADATA / pg metadata). */
+    private String ddlText;
+
     /**
      * Kiểm tra sequence có phải là sequence hệ thống (nên bỏ qua) hay không.
      * Oracle: sequences bắt đầu bằng ISEQ$$ là hệ thống.

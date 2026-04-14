@@ -96,7 +96,8 @@ public class TriggerDefinition {
     private String transformedBody;
 
     /** Trạng thái: ENABLED / DISABLED */
-    private boolean enabled;
+    @Builder.Default
+    private boolean enabled = true;
 
     /** Tên function tương ứng (PostgreSQL tách trigger body thành function riêng) */
     private String functionName;

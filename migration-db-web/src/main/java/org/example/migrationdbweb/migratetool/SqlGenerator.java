@@ -7,10 +7,23 @@ public class SqlGenerator {
 
     private final SqlDialect sourceDialect;
     private final SqlDialect targetDialect;
+    private final String sourceSchema;
+    private final String targetSchema;
 
     public SqlGenerator(SqlDialect sourceDialect, SqlDialect targetDialect) {
+        this(sourceDialect, targetDialect, null, null);
+    }
+
+    public SqlGenerator(
+            SqlDialect sourceDialect,
+            SqlDialect targetDialect,
+            String sourceSchema,
+            String targetSchema
+    ) {
         this.sourceDialect = sourceDialect;
         this.targetDialect = targetDialect;
+        this.sourceSchema = normalizeSchema(sourceSchema);
+        this.targetSchema = normalizeSchema(targetSchema);
     }
 
     // Tạo lệnh SELECT từ Source
@@ -27,7 +40,7 @@ public class SqlGenerator {
         sql.append("SELECT ")
                 .append(columns)
                 .append(" FROM ")
-                .append(sourceDialect.quoteIdentifier(table.getTableName()));
+            .append(qualifyTableName(sourceDialect, sourceSchema, table.getTableName()));
 
         if (orderByPrimaryKey && !table.getPrimaryKeys().isEmpty()) {
             String orderBy = table.getPrimaryKeys().stream()
@@ -53,7 +66,7 @@ public class SqlGenerator {
 
         StringBuilder sql = new StringBuilder();
         sql.append("INSERT INTO ")
-            .append(targetDialect.quoteIdentifier(table.getTableName()))
+            .append(qualifyTableName(targetDialect, targetSchema, table.getTableName()))
             .append(" (")
             .append(colNames)
             .append(") VALUES (")
@@ -90,8 +103,24 @@ public class SqlGenerator {
                 .collect(Collectors.joining(" AND "));
 
         return "SELECT 1 FROM "
-                + targetDialect.quoteIdentifier(table.getTableName())
+                + qualifyTableName(targetDialect, targetSchema, table.getTableName())
                 + " WHERE "
                 + whereClause;
+    }
+
+    private static String normalizeSchema(String schema) {
+        if (schema == null) {
+            return null;
+        }
+        String trimmed = schema.trim();
+        return trimmed.isEmpty() ? null : trimmed;
+    }
+
+    private static String qualifyTableName(SqlDialect dialect, String schema, String tableName) {
+        String quotedTable = dialect.quoteIdentifier(tableName);
+        if (schema == null || schema.isBlank()) {
+            return quotedTable;
+        }
+        return dialect.quoteIdentifier(schema) + "." + quotedTable;
     }
 }

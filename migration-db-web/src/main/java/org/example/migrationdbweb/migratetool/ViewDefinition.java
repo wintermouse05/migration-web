@@ -49,6 +49,9 @@ public class ViewDefinition {
     /** Schema đích — thay thế sourceSchema trong selectClause */
     private String targetSchema;
 
+    /** Full DDL text gốc của view (DBMS_METADATA / pg metadata), nếu có. */
+    private String ddlText;
+
     /**
      * Cờ cho biết đây là MATERIALIZED VIEW hay thường.
      * Hiện tại chỉ hỗ trợ regular VIEW.

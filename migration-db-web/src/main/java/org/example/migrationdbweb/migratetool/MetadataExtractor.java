@@ -8,6 +8,7 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
+import java.sql.Types;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
@@ -43,6 +44,7 @@ public class MetadataExtractor {
 
     public TableDefinition extractTableDefinition(Connection conn, String schema, String tableName) throws SQLException {
         TableDefinition tableDef = new TableDefinition(tableName);
+        tableDef.setSourceSchema(schema);
         DatabaseMetaData metaData = conn.getMetaData();
         try (ResultSet rsColumns = metaData.getColumns(null, schema, tableName, "%")) {
             while (rsColumns.next()) {
@@ -67,6 +69,10 @@ public class MetadataExtractor {
                 tableDef.addColumn(colDef);
             }
         }
+
+        // Oracle VARCHAR2/CHAR can be declared in BYTE or CHAR semantics.
+        // Preserve this information so Oracle->Oracle DDL does not shrink multibyte text capacity.
+        enrichOracleColumnLengthSemantics(conn, schema, tableName, tableDef);
 
         try (ResultSet rsPK = metaData.getPrimaryKeys(null, schema, tableName)) {
             while (rsPK.next()) {
@@ -94,7 +100,142 @@ public class MetadataExtractor {
                 tableDef.addForeignKey(fkDef);
             }
         }
+
+        if (isOracleConnection(conn)) {
+            try {
+                tableDef.setDdlText(extractOracleTableDdlViaDbmsMetadata(conn, schema, tableName));
+            } catch (SQLException ex) {
+                System.err.println("WARN: DBMS_METADATA unavailable for table "
+                        + schema + "." + tableName + ": " + ex.getMessage());
+            }
+
+            try {
+                for (String fkDdl : extractOracleForeignKeyDdlsViaDbmsMetadata(conn, schema, tableName)) {
+                    tableDef.addForeignKeyDdl(fkDdl);
+                }
+            } catch (SQLException ex) {
+                System.err.println("WARN: DBMS_METADATA unavailable for table FKs "
+                        + schema + "." + tableName + ": " + ex.getMessage());
+            }
+        }
         return tableDef;
+    }
+
+    private static void enrichOracleColumnLengthSemantics(
+            Connection conn,
+            String schema,
+            String tableName,
+            TableDefinition tableDef
+    ) {
+        if (!isOracleConnection(conn) || tableDef == null || tableDef.getColumns().isEmpty()) {
+            return;
+        }
+
+        Map<String, Boolean> charSemanticsByColumn = loadOracleCharSemantics(conn, schema, tableName);
+        for (ColumnDefinition column : tableDef.getColumns()) {
+            if (column == null || !isCharacterJdbcType(column.getJdbcType())) {
+                continue;
+            }
+
+            String normalizedName = column.getName() == null
+                    ? ""
+                    : column.getName().toUpperCase(Locale.ROOT);
+            Boolean isChar = charSemanticsByColumn.get(normalizedName);
+
+            if (isChar != null) {
+                column.setCharLengthSemantics(isChar);
+                continue;
+            }
+
+            // NVARCHAR2/NCHAR are always character-length based on Oracle.
+            String typeName = column.getTypeName();
+            if (typeName != null) {
+                String upperType = typeName.toUpperCase(Locale.ROOT);
+                if (upperType.startsWith("NCHAR") || upperType.startsWith("NVARCHAR2")) {
+                    column.setCharLengthSemantics(true);
+                }
+            }
+        }
+    }
+
+    private static Map<String, Boolean> loadOracleCharSemantics(Connection conn, String schema, String tableName) {
+        Map<String, Boolean> result = new HashMap<>();
+        if (tableName == null || tableName.isBlank()) {
+            return result;
+        }
+
+        String normalizedTable = tableName.toUpperCase(Locale.ROOT);
+        String normalizedSchema = schema == null ? "" : schema.trim().toUpperCase(Locale.ROOT);
+
+        if (!normalizedSchema.isBlank()) {
+            String allTabSql = """
+                SELECT COLUMN_NAME, CHAR_USED
+                FROM ALL_TAB_COLUMNS
+                WHERE OWNER = ?
+                  AND TABLE_NAME = ?
+                """;
+            try (PreparedStatement ps = conn.prepareStatement(allTabSql)) {
+                ps.setString(1, normalizedSchema);
+                ps.setString(2, normalizedTable);
+                try (ResultSet rs = ps.executeQuery()) {
+                    while (rs.next()) {
+                        String columnName = rs.getString("COLUMN_NAME");
+                        String charUsed = rs.getString("CHAR_USED");
+                        if (columnName != null) {
+                            result.put(columnName.toUpperCase(Locale.ROOT), "C".equalsIgnoreCase(charUsed));
+                        }
+                    }
+                }
+            } catch (SQLException ignored) {
+                // Fall back to USER_TAB_COLUMNS when ALL_TAB_COLUMNS is not accessible.
+            }
+
+            if (!result.isEmpty()) {
+                return result;
+            }
+        }
+
+        String userTabSql = """
+            SELECT COLUMN_NAME, CHAR_USED
+            FROM USER_TAB_COLUMNS
+            WHERE TABLE_NAME = ?
+            """;
+        try (PreparedStatement ps = conn.prepareStatement(userTabSql)) {
+            ps.setString(1, normalizedTable);
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    String columnName = rs.getString("COLUMN_NAME");
+                    String charUsed = rs.getString("CHAR_USED");
+                    if (columnName != null) {
+                        result.put(columnName.toUpperCase(Locale.ROOT), "C".equalsIgnoreCase(charUsed));
+                    }
+                }
+            }
+        } catch (SQLException ignored) {
+            // Keep best-effort behavior. If this fails, DDL falls back to previous defaults.
+        }
+
+        return result;
+    }
+
+    private static boolean isOracleConnection(Connection conn) {
+        if (conn == null) {
+            return false;
+        }
+        try {
+            return conn.getMetaData().getDatabaseProductName().toLowerCase(Locale.ROOT).contains("oracle");
+        } catch (SQLException e) {
+            return false;
+        }
+    }
+
+    private static boolean isCharacterJdbcType(int jdbcType) {
+        return jdbcType == Types.CHAR
+                || jdbcType == Types.NCHAR
+                || jdbcType == Types.VARCHAR
+                || jdbcType == Types.NVARCHAR
+                || jdbcType == Types.LONGVARCHAR
+                || jdbcType == Types.LONGNVARCHAR;
     }
 
     private static boolean isPostgreSqlConnection(Connection conn) {
@@ -204,12 +345,14 @@ public class MetadataExtractor {
     ) throws SQLException {
         String selectClause = null;
         String checkOption = null;
+        String ddlText = null;
 
         if (dbType == DatabaseType.ORACLE) {
             // Prefer DBMS_METADATA for complete DDL, fallback to USER_VIEWS.TEXT.
             String fullText = null;
             try {
                 fullText = extractOracleViewDdlViaDbmsMetadata(conn, schema, viewName);
+                ddlText = fullText;
             } catch (SQLException ex) {
                 System.err.println("WARN: DBMS_METADATA unavailable for view "
                         + schema + "." + viewName + ": " + ex.getMessage());
@@ -278,6 +421,11 @@ public class MetadataExtractor {
             }
         }
 
+        if ((selectClause == null || selectClause.isBlank())
+                && ddlText != null && !ddlText.isBlank()) {
+            selectClause = ddlText;
+        }
+
         if (selectClause == null || selectClause.isBlank()) {
             return null;
         }
@@ -289,6 +437,7 @@ public class MetadataExtractor {
                 .selectClause(selectClause.trim())
                 .checkOption(checkOption)
                 .sourceSchema(schema)
+                .ddlText(ddlText)
                 .build();
     }
 
@@ -550,16 +699,25 @@ public class MetadataExtractor {
             ps.setString(1, sequenceName);
             try (ResultSet rs = ps.executeQuery()) {
                 if (rs.next()) {
+                    String ddlText = null;
+                    try {
+                        ddlText = extractOracleSequenceDdlViaDbmsMetadata(conn, schema, sequenceName);
+                    } catch (SQLException ex) {
+                        System.err.println("WARN: DBMS_METADATA unavailable for sequence "
+                                + schema + "." + sequenceName + ": " + ex.getMessage());
+                    }
+
                     BigDecimal lastNumberRaw = rs.getBigDecimal("LAST_NUMBER");
                     BigDecimal incrementByRaw = rs.getBigDecimal("INCREMENT_BY");
 
-                    long incrementBy = toLongSaturated(incrementByRaw, 1L, "INCREMENT_BY", sequenceName);
+                    boolean hasRawDdl = ddlText != null && !ddlText.isBlank();
+                    long incrementBy = toLongSaturated(incrementByRaw, 1L, "INCREMENT_BY", sequenceName, !hasRawDdl);
 
                     // Oracle START WITH = LAST_NUMBER (giá trị cuối cùng đã generate)
                     BigDecimal startValueRaw = (lastNumberRaw == null ? BigDecimal.ONE : lastNumberRaw)
                             .subtract(incrementByRaw == null ? BigDecimal.ONE : incrementByRaw)
                             .add(BigDecimal.ONE);
-                    long startValue = Math.max(1L, toLongSaturated(startValueRaw, 1L, "START_VALUE", sequenceName));
+                    long startValue = Math.max(1L, toLongSaturated(startValueRaw, 1L, "START_VALUE", sequenceName, !hasRawDdl));
 
                     return SequenceDefinition.builder()
                             .sequenceName(rs.getString("SEQUENCE_NAME"))
@@ -567,12 +725,13 @@ public class MetadataExtractor {
                             .sourceDialect(DatabaseType.ORACLE)
                             .startValue(startValue)
                             .incrementBy(incrementBy)
-                            .minValue(toNullableLongSafely(rs, "MIN_VALUE", sequenceName))
-                            .maxValue(toNullableLongSafely(rs, "MAX_VALUE", sequenceName))
-                            .cacheSize(toNullableLongSafely(rs, "CACHE_SIZE", sequenceName))
+                            .minValue(toNullableLongSafely(rs, "MIN_VALUE", sequenceName, !hasRawDdl))
+                            .maxValue(toNullableLongSafely(rs, "MAX_VALUE", sequenceName, !hasRawDdl))
+                            .cacheSize(toNullableLongSafely(rs, "CACHE_SIZE", sequenceName, !hasRawDdl))
                             .cycle("Y".equalsIgnoreCase(rs.getString("CYCLE_FLAG")))
-                            .lastNumber(toNullableLongSafely(rs, "LAST_NUMBER", sequenceName))
+                            .lastNumber(toNullableLongSafely(rs, "LAST_NUMBER", sequenceName, !hasRawDdl))
                             .sourceSchema(schema)
+                            .ddlText(ddlText)
                             .build();
                 }
             }
@@ -581,11 +740,15 @@ public class MetadataExtractor {
     }
 
     private static Long toNullableLongSafely(ResultSet rs, String column, String sequenceName) throws SQLException {
+        return toNullableLongSafely(rs, column, sequenceName, true);
+    }
+
+    private static Long toNullableLongSafely(ResultSet rs, String column, String sequenceName, boolean logWarning) throws SQLException {
         BigDecimal value = rs.getBigDecimal(column);
         if (value == null) {
             return null;
         }
-        return toLongOrNullIfOverflow(value, column, sequenceName);
+        return toLongOrNullIfOverflow(value, column, sequenceName, logWarning);
     }
 
     private static long toRequiredLongSafely(ResultSet rs, String column, long fallback, String sequenceName) throws SQLException {
@@ -594,6 +757,16 @@ public class MetadataExtractor {
     }
 
     private static long toLongSaturated(BigDecimal value, long fallback, String column, String sequenceName) {
+        return toLongSaturated(value, fallback, column, sequenceName, true);
+    }
+
+    private static long toLongSaturated(
+            BigDecimal value,
+            long fallback,
+            String column,
+            String sequenceName,
+            boolean logWarning
+    ) {
         if (value == null) {
             return fallback;
         }
@@ -603,13 +776,17 @@ public class MetadataExtractor {
         BigInteger longMax = BigInteger.valueOf(Long.MAX_VALUE);
 
         if (integerValue.compareTo(longMin) < 0) {
-            System.err.println("[SEQ-WARN] " + sequenceName + ": " + column
-                    + " < Long.MIN_VALUE, clamp ve Long.MIN_VALUE.");
+            if (logWarning) {
+                System.err.println("[SEQ-WARN] " + sequenceName + ": " + column
+                        + " < Long.MIN_VALUE, clamp ve Long.MIN_VALUE.");
+            }
             return Long.MIN_VALUE;
         }
         if (integerValue.compareTo(longMax) > 0) {
-            System.err.println("[SEQ-WARN] " + sequenceName + ": " + column
-                    + " > Long.MAX_VALUE, clamp ve Long.MAX_VALUE.");
+            if (logWarning) {
+                System.err.println("[SEQ-WARN] " + sequenceName + ": " + column
+                        + " > Long.MAX_VALUE, clamp ve Long.MAX_VALUE.");
+            }
             return Long.MAX_VALUE;
         }
 
@@ -617,13 +794,24 @@ public class MetadataExtractor {
     }
 
     private static Long toLongOrNullIfOverflow(BigDecimal value, String column, String sequenceName) {
+        return toLongOrNullIfOverflow(value, column, sequenceName, true);
+    }
+
+    private static Long toLongOrNullIfOverflow(
+            BigDecimal value,
+            String column,
+            String sequenceName,
+            boolean logWarning
+    ) {
         BigInteger integerValue = value.toBigInteger();
         BigInteger longMin = BigInteger.valueOf(Long.MIN_VALUE);
         BigInteger longMax = BigInteger.valueOf(Long.MAX_VALUE);
 
         if (integerValue.compareTo(longMin) < 0 || integerValue.compareTo(longMax) > 0) {
-            System.err.println("[SEQ-WARN] " + sequenceName + ": " + column
-                    + " vuot pham vi BIGINT, bo qua gia tri nay.");
+            if (logWarning) {
+                System.err.println("[SEQ-WARN] " + sequenceName + ": " + column
+                        + " vuot pham vi BIGINT, bo qua gia tri nay.");
+            }
             return null;
         }
 
@@ -857,6 +1045,14 @@ public class MetadataExtractor {
                 String constraintType = rs.getString("CONSTRAINT_TYPE");
                 String generated = rs.getString("GENERATED");
 
+                String ddlText = null;
+                try {
+                    ddlText = extractOracleIndexDdlViaDbmsMetadata(conn, schema, indexName);
+                } catch (SQLException ex) {
+                    System.err.println("WARN: DBMS_METADATA unavailable for index "
+                            + schema + "." + indexName + ": " + ex.getMessage());
+                }
+
                 // Lấy columns
                 List<String> columns = new ArrayList<>();
                 List<String> descendings = new ArrayList<>();
@@ -913,6 +1109,7 @@ public class MetadataExtractor {
                         .indexTypeName(buildOracleIndexTypeName(idxType, itypName))
                         .sourceDialect(DatabaseType.ORACLE)
                         .sourceSchema(schema)
+                        .ddlText(ddlText)
                         .systemIndex(system)
                         .build();
             }
@@ -1689,6 +1886,114 @@ public class MetadataExtractor {
                     if (clob != null) {
                         long length = clob.length();
                         if (length > 0 && length < 2_000_000) {
+                            return clob.getSubString(1, (int) length).trim();
+                        }
+                    }
+                }
+            }
+        }
+        return null;
+    }
+
+    private String extractOracleTableDdlViaDbmsMetadata(
+            Connection conn,
+            String schema,
+            String tableName
+    ) throws SQLException {
+        return extractOracleObjectDdlViaDbmsMetadata(conn, "TABLE", schema, tableName, 4_000_000L);
+    }
+
+    private String extractOracleSequenceDdlViaDbmsMetadata(
+            Connection conn,
+            String schema,
+            String sequenceName
+    ) throws SQLException {
+        return extractOracleObjectDdlViaDbmsMetadata(conn, "SEQUENCE", schema, sequenceName, 1_000_000L);
+    }
+
+    private String extractOracleIndexDdlViaDbmsMetadata(
+            Connection conn,
+            String schema,
+            String indexName
+    ) throws SQLException {
+        return extractOracleObjectDdlViaDbmsMetadata(conn, "INDEX", schema, indexName, 2_000_000L);
+    }
+
+    private List<String> extractOracleForeignKeyDdlsViaDbmsMetadata(
+            Connection conn,
+            String schema,
+            String tableName
+    ) throws SQLException {
+        String sql = "SELECT DBMS_METADATA.GET_DEPENDENT_DDL('REF_CONSTRAINT', ?, ?) AS DDL_TEXT FROM DUAL";
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setString(1, tableName);
+            ps.setString(2, schema);
+            try (ResultSet rs = ps.executeQuery()) {
+                if (rs.next()) {
+                    java.sql.Clob clob = rs.getClob("DDL_TEXT");
+                    if (clob != null) {
+                        long length = clob.length();
+                        if (length > 0 && length < 4_000_000) {
+                            String ddl = clob.getSubString(1, (int) length);
+                            return splitOracleMetadataDdlBlocks(ddl);
+                        }
+                    }
+                }
+            }
+        } catch (SQLException ex) {
+            String message = ex.getMessage() == null ? "" : ex.getMessage().toLowerCase(Locale.ROOT);
+            if (message.contains("no data") || message.contains("not found") || message.contains("ora-31603")) {
+                return Collections.emptyList();
+            }
+            throw ex;
+        }
+
+        return Collections.emptyList();
+    }
+
+    private static List<String> splitOracleMetadataDdlBlocks(String rawDdl) {
+        if (rawDdl == null || rawDdl.isBlank()) {
+            return Collections.emptyList();
+        }
+
+        List<String> statements = new ArrayList<>();
+        String[] blocks = rawDdl.split("(?m)^\\s*/\\s*$");
+        for (String block : blocks) {
+            if (block == null) {
+                continue;
+            }
+            String trimmed = block.trim();
+            if (trimmed.isEmpty()) {
+                continue;
+            }
+            while (trimmed.endsWith(";")) {
+                trimmed = trimmed.substring(0, trimmed.length() - 1).trim();
+            }
+            if (!trimmed.isEmpty()) {
+                statements.add(trimmed);
+            }
+        }
+        return statements;
+    }
+
+    private String extractOracleObjectDdlViaDbmsMetadata(
+            Connection conn,
+            String objectType,
+            String schema,
+            String objectName,
+            long maxLength
+    ) throws SQLException {
+        String sql = "SELECT DBMS_METADATA.GET_DDL(?, ?, ?) AS DDL_TEXT FROM DUAL";
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setString(1, objectType);
+            ps.setString(2, objectName);
+            ps.setString(3, schema);
+            try (ResultSet rs = ps.executeQuery()) {
+                if (rs.next()) {
+                    java.sql.Clob clob = rs.getClob("DDL_TEXT");
+                    if (clob != null) {
+                        long length = clob.length();
+                        if (length > 0 && length < maxLength) {
                             return clob.getSubString(1, (int) length).trim();
                         }
                     }

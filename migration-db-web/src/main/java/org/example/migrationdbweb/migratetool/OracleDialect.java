@@ -18,9 +18,20 @@ public class OracleDialect implements SqlDialect {
 
         switch (col.getJdbcType()) {
             case Types.VARCHAR:
-            case Types.NVARCHAR:
+                baseType = col.getSize() > 0
+                        ? "VARCHAR2(" + col.getSize() + (col.isCharLengthSemantics() ? " CHAR" : " BYTE") + ")"
+                        : "VARCHAR2(4000)";
+                break;
             case Types.CHAR:
-                baseType = col.getSize() > 0 ? "VARCHAR2(" + col.getSize() + ")" : "VARCHAR2(4000)";
+                baseType = col.getSize() > 0
+                        ? "CHAR(" + col.getSize() + (col.isCharLengthSemantics() ? " CHAR" : " BYTE") + ")"
+                        : "CHAR(1)";
+                break;
+            case Types.NVARCHAR:
+                baseType = col.getSize() > 0 ? "NVARCHAR2(" + col.getSize() + ")" : "NVARCHAR2(2000)";
+                break;
+            case Types.NCHAR:
+                baseType = col.getSize() > 0 ? "NCHAR(" + col.getSize() + ")" : "NCHAR(1)";
                 break;
             case Types.INTEGER:
             case Types.SMALLINT:
@@ -67,6 +78,15 @@ public class OracleDialect implements SqlDialect {
 
     @Override
     public String buildCreateTableSql(TableDefinition table) {
+        if (table != null && table.getDdlText() != null && !table.getDdlText().isBlank()) {
+            String ddl = remapOracleSchemaPrefix(table.getDdlText(), table.getSourceSchema(), table.getTargetSchema());
+            ddl = stripUnsupportedOracleTableClauses(ddl);
+            ddl = stripSqlPlusDelimiter(ddl);
+            if (ddl != null && !ddl.isBlank()) {
+                return ddl.trim();
+            }
+        }
+
         StringBuilder sql = new StringBuilder();
         // Oracle thường yêu cầu tên đối tượng viết hoa
         sql.append("CREATE TABLE ").append(quoteIdentifier(table.getTableName().toUpperCase())).append(" (\n");
@@ -105,6 +125,22 @@ public class OracleDialect implements SqlDialect {
     public List<String> buildAddForeignKeySql(TableDefinition table) {
         List<String> alterStatements = new ArrayList<>();
 
+        if (table != null && table.getForeignKeyDdls() != null && !table.getForeignKeyDdls().isEmpty()) {
+            for (String ddl : table.getForeignKeyDdls()) {
+                if (ddl == null || ddl.isBlank()) {
+                    continue;
+                }
+                String remapped = remapOracleSchemaPrefix(ddl, table.getSourceSchema(), table.getTargetSchema());
+                remapped = stripSqlPlusDelimiter(remapped);
+                if (remapped != null && !remapped.isBlank()) {
+                    alterStatements.add(remapped.trim());
+                }
+            }
+            if (!alterStatements.isEmpty()) {
+                return alterStatements;
+            }
+        }
+
         for (ForeignKeyDefinition fk : table.getForeignKeys()) {
             StringBuilder sql = new StringBuilder();
 
@@ -131,6 +167,14 @@ public class OracleDialect implements SqlDialect {
 
     @Override
     public String buildCreateSequenceSql(SequenceDefinition seq) {
+        if (seq != null && seq.getDdlText() != null && !seq.getDdlText().isBlank()) {
+            String ddl = remapOracleSchemaPrefix(seq.getDdlText(), seq.getSourceSchema(), seq.getTargetSchema());
+            ddl = stripSqlPlusDelimiter(ddl);
+            if (ddl != null && !ddl.isBlank()) {
+                return ddl.trim();
+            }
+        }
+
         StringBuilder sb = new StringBuilder();
         sb.append("CREATE SEQUENCE ");
         sb.append(quoteIdentifier(seq.getSequenceName()));
@@ -158,6 +202,16 @@ public class OracleDialect implements SqlDialect {
     @Override
     public List<String> buildCreateIndexSql(IndexDefinition idx) {
         List<String> stmts = new ArrayList<>();
+
+        if (idx != null && idx.getDdlText() != null && !idx.getDdlText().isBlank()) {
+            String ddl = remapOracleSchemaPrefix(idx.getDdlText(), idx.getSourceSchema(), idx.getTargetSchema());
+            ddl = stripSqlPlusDelimiter(ddl);
+            if (ddl != null && !ddl.isBlank()) {
+                stmts.add(ddl.trim());
+                return stmts;
+            }
+        }
+
         StringBuilder sb = new StringBuilder();
 
         if (idx.getIndexType() == IndexDefinition.IndexType.BITMAP) {
@@ -357,6 +411,15 @@ public class OracleDialect implements SqlDialect {
                 sql.append("\nWITH ").append(viewDef.getCheckOption()).append(" CHECK OPTION");
             }
             return sql.toString();
+        }
+
+        if (viewDef.getSourceDialect() == DatabaseType.ORACLE
+                && viewDef.getDdlText() != null && !viewDef.getDdlText().isBlank()) {
+            String ddl = remapOracleSchemaPrefix(viewDef.getDdlText(), viewDef.getSourceSchema(), viewDef.getTargetSchema());
+            ddl = stripSqlPlusDelimiter(ddl);
+            if (ddl != null && !ddl.isBlank()) {
+                return ddl.trim();
+            }
         }
 
         // Oracle USER_VIEWS.TEXT chứa "CREATE [OR REPLACE] ... VIEW ... AS SELECT ..."
@@ -678,6 +741,20 @@ public class OracleDialect implements SqlDialect {
         if (normalized.endsWith("/")) {
             normalized = normalized.substring(0, normalized.length() - 1).trim();
         }
+        return normalized;
+    }
+
+    private static String stripUnsupportedOracleTableClauses(String ddl) {
+        if (ddl == null || ddl.isBlank()) {
+            return ddl;
+        }
+
+        // SHARING clause is only legal in specific multitenant contexts.
+        // Remove it for portability when replaying raw TABLE DDL on target.
+        String normalized = ddl.replaceAll(
+                "(?is)(\\bCREATE\\s+TABLE\\b[^\\(]*?)\\bSHARING\\s*=\\s*[A-Z_]+\\s*",
+                "$1 "
+        );
         return normalized;
     }
 

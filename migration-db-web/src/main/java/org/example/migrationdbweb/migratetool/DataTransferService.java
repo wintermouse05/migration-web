@@ -16,6 +16,7 @@ import java.time.LocalDateTime;
 import java.time.LocalTime;
 import java.time.OffsetDateTime;
 import java.time.ZonedDateTime;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
 
@@ -189,6 +190,7 @@ public class DataTransferService {
                 int currentBatchCount = 0;
                 boolean limitReached = false;
                 int sourceRowsRead = 0;
+                List<Object[]> pendingBatchRows = new ArrayList<>(safeBatchSize);
 
                 int skippedByOffset = 0;
                 while (skippedByOffset < safeStartOffset && rs.next()) {
@@ -214,11 +216,13 @@ public class DataTransferService {
                     }
 
                     // Đọc từng cột và gán vào tham sềEcủa INSERT
+                    Object[] rowValues = new Object[columnCount];
                     for (int i = 1; i <= columnCount; i++) {
                         ColumnDefinition column = table.getColumns().get(i - 1);
                         int jdbcType = normalizeJdbcTypeForTarget(column.getJdbcType());
 
                         Object value = rs.getObject(i);
+                        rowValues[i - 1] = value;
                         if (value == null) {
                             setNullSafely(targetPstmt, i, jdbcType);
                             continue;
@@ -229,26 +233,29 @@ public class DataTransferService {
 
                     // Đưa lệnh INSERT đã được gán giá trềEvào danh sách chềE(Batch)
                     targetPstmt.addBatch();
+                    pendingBatchRows.add(rowValues);
                     currentBatchCount++;
                     totalTransferred++;
 
                     // Khi Batch đầy, tiến hành gửi sang DB đích và Commit
                     if (currentBatchCount % safeBatchSize == 0) {
-                        executeBatchWithRetry(targetPstmt, targetConn, table.getTableName());
+                        executeBatchWithRetry(targetPstmt, targetConn, table.getTableName(), pendingBatchRows, table);
                         if (progressListener != null) {
                             progressListener.onBatchCommitted(table.getTableName(), currentBatchCount, totalTransferred, totalSkipped);
                         }
                         currentBatchCount = 0;
+                        pendingBatchRows.clear();
                         System.out.println("  -> Copied " + totalTransferred + " rows...");
                     }
                 }
 
                 // Thực thi nốt những dòng còn dư cuối cùng (nếu sềEdòng không chia hết cho batchSize)
                 if (currentBatchCount > 0) {
-                    executeBatchWithRetry(targetPstmt, targetConn, table.getTableName());
+                    executeBatchWithRetry(targetPstmt, targetConn, table.getTableName(), pendingBatchRows, table);
                     if (progressListener != null) {
                         progressListener.onBatchCommitted(table.getTableName(), currentBatchCount, totalTransferred, totalSkipped);
                     }
+                    pendingBatchRows.clear();
                     System.out.println("  -> Copied " + totalTransferred + " rows...");
                 }
 
@@ -327,7 +334,9 @@ public class DataTransferService {
     private void executeBatchWithRetry(
             PreparedStatement targetPstmt,
             Connection targetConn,
-            String tableName
+            String tableName,
+            List<Object[]> pendingBatchRows,
+            TableDefinition table
     ) throws SQLException {
         int attempts = retryPolicy.resolveAttempts();
 
@@ -338,29 +347,57 @@ public class DataTransferService {
                 targetPstmt.clearBatch();
                 return;
             } catch (SQLException e) {
-                // ⚠️ QUAN TRỌNG: Phải clearBatch() TRƯỚC KHI rollback và retry.
-                // Nếu không clear → JDBC driver giữ nguyên batch state đã fail,
-                // retry thêm batch() mới sẽ bị duplicate rows.
-                try {
-                    targetPstmt.clearBatch();
-                } catch (SQLException ignored) {
-                    // clearBatch() có thể throw nếu driver ở trạng thái không hợp lệ
-                    // Tạo statement mới trong retry loop để đảm bảo clean state
-                }
                 targetConn.rollback();
                 if (!isRetryableException(e) || attempt == attempts) {
                     String detail = buildSqlExceptionDetail(e);
+                    if (isValueTooLargeException(e)) {
+                        detail += " | Hint: ORA-12899 usually means target column length is smaller than source value"
+                                + " or Oracle BYTE/CHAR semantics mismatch."
+                                + " Recreate/alter target columns to match source definition before re-run.";
+                    }
                     throw new SQLException(
                         "Unable to execute batch for table " + tableName + " after " + attempt + " attempts. Details: " + detail,
                             e
                     );
                 }
 
+                // Rebuild this failed batch explicitly so retry executes the same rows.
+                targetPstmt.clearBatch();
+                rebindBatchRows(targetPstmt, pendingBatchRows, table);
+
                 long delayMs = retryPolicy.delayForAttempt(attempt);
                 System.err.println("Transient batch error on table " + tableName + " attempt " + attempt + "/" + attempts
                         + ", retry in " + delayMs + " ms. Reason: " + buildSqlExceptionDetail(e));
                 sleep(delayMs);
             }
+        }
+    }
+
+    private static void rebindBatchRows(
+            PreparedStatement targetPstmt,
+            List<Object[]> pendingBatchRows,
+            TableDefinition table
+    ) throws SQLException {
+        int columnCount = table.getColumns().size();
+        for (Object[] rowValues : pendingBatchRows) {
+            if (rowValues == null || rowValues.length != columnCount) {
+                throw new SQLException("Cannot rebuild failed batch for table " + table.getTableName()
+                        + ": row buffer is invalid.");
+            }
+
+            for (int i = 1; i <= columnCount; i++) {
+                ColumnDefinition column = table.getColumns().get(i - 1);
+                int jdbcType = normalizeJdbcTypeForTarget(column.getJdbcType());
+                Object value = rowValues[i - 1];
+
+                if (value == null) {
+                    setNullSafely(targetPstmt, i, jdbcType);
+                } else {
+                    bindValueSafely(targetPstmt, i, value, jdbcType, column, table.getTableName());
+                }
+            }
+
+            targetPstmt.addBatch();
         }
     }
 
@@ -440,6 +477,26 @@ public class DataTransferService {
                 || lowered.contains("broken pipe")
                 || lowered.contains("i/o error")
                 || lowered.contains("communications link failure");
+    }
+
+    private static boolean isValueTooLargeException(SQLException e) {
+        SQLException current = e;
+        while (current != null) {
+            if (current.getErrorCode() == 12899) {
+                return true;
+            }
+            String message = current.getMessage();
+            if (message != null && message.toLowerCase().contains("ora-12899")) {
+                return true;
+            }
+
+            SQLException next = current.getNextException();
+            if (next == null && current.getCause() instanceof SQLException causeSql) {
+                next = causeSql;
+            }
+            current = next;
+        }
+        return false;
     }
 
     private static void sleep(long millis) throws SQLException {

@@ -149,6 +149,8 @@ public class MigrationWorker extends SwingWorker<Void, String> {
                 publish("Schema nguồn: " + sourceSchema + " | Schema đích: " + targetSchema);
                 configurePostgresSchema(sourceConn, sourceConfig, sourceSchema, false);
                 configurePostgresSchema(targetConn, targetConfig, targetSchema, true);
+                configureOracleSchema(sourceConn, sourceConfig, sourceSchema);
+                configureOracleSchema(targetConn, targetConfig, targetSchema);
                 publish("Tùy chọn: truncate=" + truncateTarget
                     + ", copyNewOnly=" + copyNewOnly
                     + ", copyOnlyTargetEmptyTables=" + copyOnlyTargetEmptyTables
@@ -189,7 +191,9 @@ public class MigrationWorker extends SwingWorker<Void, String> {
                 for (int i = 0; i < totalTables; i++) {
                     ensureNotCancelled();
                     String tableName = tableNames.get(i);
-                    allTables.add(metadataExtractor.extractTableDefinition(sourceConn, sourceSchema, tableName));
+                    TableDefinition tableDefinition = metadataExtractor.extractTableDefinition(sourceConn, sourceSchema, tableName);
+                    tableDefinition.setTargetSchema(targetSchema);
+                    allTables.add(tableDefinition);
                     publish("  -> Đã đọc metadata bảng " + tableName);
                     setProgress(5 + (int) (((i + 1) / (float) totalTables) * 20));
                 }
@@ -267,7 +271,12 @@ public class MigrationWorker extends SwingWorker<Void, String> {
 
                 if (!isStructureOnly) {
                     publish("--- BẮT ĐẦU CHUYỂN DỮ LIỆU (DML) ---");
-                    SqlGenerator sqlGenerator = new SqlGenerator(sourceDialect, targetDialect);
+                        SqlGenerator sqlGenerator = new SqlGenerator(
+                            sourceDialect,
+                            targetDialect,
+                            sourceSchema,
+                            targetSchema
+                        );
 
                     if (truncateTarget) {
                         publish("--- TRUNCATE DỮ LIỆU CŨ TRÊN TARGET ---");
@@ -351,23 +360,104 @@ public class MigrationWorker extends SwingWorker<Void, String> {
         try (Statement statement = targetConn.createStatement()) {
             for (TableDefinition table : allTables) {
                 ensureNotCancelled();
+                boolean rawOracleTableDdlMode = isOracleToOracleDirectDdlMode(targetDialect)
+                        && table.getDdlText() != null
+                        && !table.getDdlText().isBlank();
+
                 String createSql = normalizeSqlForJdbc(targetDialect.buildCreateTableSql(table));
+                if (targetDialect instanceof OracleDialect
+                        && targetSchema != null
+                        && !targetSchema.isBlank()) {
+                    createSql = qualifyOracleCreateTableSql(createSql, targetDialect, targetSchema, table.getTableName());
+                }
                 try {
                     statement.execute(createSql);
                     publish("  -> Đã tạo bảng " + table.getTableName());
                 } catch (SQLException e) {
                     if (isTableAlreadyExistsError(e)) {
                         publish("  -> Bỏ qua bảng đã tồn tại: " + table.getTableName());
+                    } else if (rawOracleTableDdlMode
+                            && targetDialect instanceof OracleDialect
+                            && isOracleRawTableDdlIncompatibleError(e)) {
+                        publish("  -> [WARN] Raw Oracle DDL khong tuong thich cho bang "
+                                + table.getTableName() + ". Se fallback sang DDL tong hop. Ly do: " + e.getMessage());
+
+                        String fallbackCreateSql = buildOracleGeneratedCreateTableSql(table, targetDialect, targetSchema);
+                        try {
+                            statement.execute(fallbackCreateSql);
+                            publish("  -> Đã tạo bảng " + table.getTableName() + " (fallback DDL tong hop)");
+                        } catch (SQLException fallbackEx) {
+                            publish("  -> [DDL-DEBUG] RAW CREATE SQL: " + abbreviateSqlForLog(createSql));
+                            publish("  -> [DDL-DEBUG] FALLBACK CREATE SQL: " + abbreviateSqlForLog(fallbackCreateSql));
+                            throw fallbackEx;
+                        }
                     } else {
+                        publish("  -> [DDL-DEBUG] CREATE TABLE SQL: " + abbreviateSqlForLog(createSql));
                         throw e;
                     }
                 }
 
-                if (targetDialect instanceof OracleDialect) {
+                if (targetDialect instanceof OracleDialect && !rawOracleTableDdlMode) {
                     ensureOracleIdentityColumnsAllowExplicitInsert(statement, table, targetDialect);
                 }
             }
         }
+    }
+
+    private static String buildOracleGeneratedCreateTableSql(
+            TableDefinition table,
+            SqlDialect targetDialect,
+            String targetSchema
+    ) {
+        TableDefinition generated = new TableDefinition(table.getTableName());
+        generated.setSourceSchema(table.getSourceSchema());
+        generated.setTargetSchema(table.getTargetSchema());
+
+        for (ColumnDefinition column : table.getColumns()) {
+            generated.addColumn(column);
+        }
+        for (String pk : table.getPrimaryKeys()) {
+            generated.addPrimaryKey(pk);
+        }
+        for (ForeignKeyDefinition fk : table.getForeignKeys()) {
+            generated.addForeignKey(fk);
+        }
+
+        String fallbackCreateSql = normalizeSqlForJdbc(targetDialect.buildCreateTableSql(generated));
+        if (targetDialect instanceof OracleDialect
+                && targetSchema != null
+                && !targetSchema.isBlank()) {
+            fallbackCreateSql = qualifyOracleCreateTableSql(
+                    fallbackCreateSql,
+                    targetDialect,
+                    targetSchema,
+                    table.getTableName()
+            );
+        }
+        return fallbackCreateSql;
+    }
+
+    private static String qualifyOracleCreateTableSql(
+            String createSql,
+            SqlDialect targetDialect,
+            String schema,
+            String tableName
+    ) {
+        if (createSql == null || targetDialect == null || schema == null || schema.isBlank() || tableName == null || tableName.isBlank()) {
+            return createSql;
+        }
+
+        String quotedTable = targetDialect.quoteIdentifier(tableName.toUpperCase(Locale.ROOT));
+        String prefix = "CREATE TABLE " + quotedTable;
+        if (!createSql.startsWith(prefix)) {
+            return createSql;
+        }
+
+        return "CREATE TABLE "
+                + targetDialect.quoteIdentifier(schema)
+                + "."
+                + quotedTable
+                + createSql.substring(prefix.length());
     }
 
     private void ensureOracleIdentityColumnsAllowExplicitInsert(
@@ -381,7 +471,11 @@ public class MigrationWorker extends SwingWorker<Void, String> {
             }
 
             String alterIdentitySql = "ALTER TABLE "
-                    + targetDialect.quoteIdentifier(table.getTableName())
+                    + qualifyTableName(
+                        targetDialect,
+                        targetSchema,
+                        normalizeTableNameForDialect(targetDialect, table.getTableName())
+                    )
                     + " MODIFY "
                     + targetDialect.quoteIdentifier(column.getName())
                     + " GENERATED BY DEFAULT AS IDENTITY";
@@ -439,18 +533,18 @@ public class MigrationWorker extends SwingWorker<Void, String> {
         try (Statement statement = targetConn.createStatement()) {
             for (TableDefinition table : allTables) {
                 ensureNotCancelled();
-                String tableNameForSql = table.getTableName();
+                String tableNameForSql = normalizeTableNameForDialect(targetDialect, table.getTableName());
+                String qualifiedTable = qualifyTableName(targetDialect, targetSchema, tableNameForSql);
                 String truncateSql;
 
                 if (targetDialect instanceof PostgresDialect) {
                     truncateSql = "TRUNCATE TABLE "
-                            + targetDialect.quoteIdentifier(tableNameForSql)
+                            + qualifiedTable
                             + " RESTART IDENTITY CASCADE";
                 } else if (targetDialect instanceof OracleDialect) {
-                    truncateSql = "TRUNCATE TABLE "
-                            + targetDialect.quoteIdentifier(tableNameForSql.toUpperCase(Locale.ROOT));
+                    truncateSql = "TRUNCATE TABLE " + qualifiedTable;
                 } else {
-                    truncateSql = "TRUNCATE TABLE " + targetDialect.quoteIdentifier(tableNameForSql);
+                    truncateSql = "TRUNCATE TABLE " + qualifiedTable;
                 }
 
                 try {
@@ -459,7 +553,7 @@ public class MigrationWorker extends SwingWorker<Void, String> {
                 } catch (SQLException e) {
                     if (targetDialect instanceof OracleDialect && isTruncateBlockedByForeignKey(e)) {
                         oracleDeleteFallbackTables.add(table);
-                        publish("  -> Bảng " + table.getTableName() + " bềEchặn TRUNCATE bởi FK, sẽ fallback sang DELETE.");
+                        publish("  -> Bảng " + table.getTableName() + " bị chặn TRUNCATE bởi FK, sẽ fallback sang DELETE.");
                         continue;
                     }
 
@@ -492,8 +586,13 @@ public class MigrationWorker extends SwingWorker<Void, String> {
 
             try (Statement statement = targetConn.createStatement()) {
                 for (TableDefinition table : remaining) {
+                    String qualifiedTable = qualifyTableName(
+                        targetDialect,
+                        targetSchema,
+                        normalizeTableNameForDialect(targetDialect, table.getTableName())
+                    );
                     String deleteSql = "DELETE FROM "
-                            + targetDialect.quoteIdentifier(table.getTableName().toUpperCase(Locale.ROOT));
+                        + qualifiedTable;
 
                     try {
                         int deleted = statement.executeUpdate(deleteSql);
@@ -538,7 +637,7 @@ public class MigrationWorker extends SwingWorker<Void, String> {
 
     private void ensureNotCancelled() {
         if (isCancelled()) {
-            throw new RuntimeException("Tiến trình đã bềEhủy.");
+            throw new RuntimeException("Tiến trình đã bị hủy.");
         }
     }
 
@@ -642,11 +741,18 @@ public class MigrationWorker extends SwingWorker<Void, String> {
         List<TableMigrationPlan> runnablePlans = new ArrayList<>();
         try (Connection targetPlanConn = manager.getConnection(targetPoolId)) {
             configurePostgresSchema(targetPlanConn, targetConfig, targetSchema, true);
+            configureOracleSchema(targetPlanConn, targetConfig, targetSchema);
 
             for (TableMigrationPlan plan : plans) {
                 TableDefinition table = plan.table();
                 if (checkpointStore != null && checkpointStore.isTableCompleted(table.getTableName())) {
                     publish("  -> Bo qua bang da migrate truoc do (resume): " + table.getTableName());
+                    continue;
+                }
+
+                if (!doesTableExist(targetPlanConn, targetDialect, targetSchema, table.getTableName())) {
+                    publish("  -> Bo qua bang " + table.getTableName()
+                            + " vi target table khong ton tai (tranh ORA-00942). ");
                     continue;
                 }
 
@@ -745,6 +851,11 @@ public class MigrationWorker extends SwingWorker<Void, String> {
                                     result.isLimitReached()
                             );
                         } catch (SQLException | RuntimeException ex) {
+                            SQLException sqlException = extractSqlException(ex);
+                            if (isTableNotExistsError(sqlException)) {
+                                String detail = sqlException == null ? ex.getMessage() : sqlException.getMessage();
+                                return TableTransferOutcome.skippedTableNotExists(tableName, detail);
+                            }
                             return TableTransferOutcome.failed(tableName, ex.getMessage());
                         }
                     });
@@ -755,7 +866,10 @@ public class MigrationWorker extends SwingWorker<Void, String> {
                     Future<TableTransferOutcome> future = levelCompletionService.take();
                     TableTransferOutcome outcome = future.get();
 
-                    if (!outcome.success()) {
+                    if (outcome.skippedTable()) {
+                        publish("  -> BO QUA bang " + outcome.tableName()
+                                + " do ORA-00942 (table/view khong ton tai): " + outcome.errorMessage());
+                    } else if (!outcome.success()) {
                         if (firstFailure == null) {
                             firstFailure = new SQLException(
                                     "Khong the migrate bang " + outcome.tableName() + ": " + outcome.errorMessage()
@@ -821,9 +935,14 @@ public class MigrationWorker extends SwingWorker<Void, String> {
 
         try (Connection sourceConn = manager.getConnection(sourcePoolId)) {
             configurePostgresSchema(sourceConn, sourceConfig, sourceSchema, false);
+            configureOracleSchema(sourceConn, sourceConfig, sourceSchema);
 
             for (int i = 0; i < allTables.size(); i++) {
                 TableDefinition table = allTables.get(i);
+                if (!doesTableExist(sourceConn, sourceDialect, sourceSchema, table.getTableName())) {
+                    publish("  -> [WARN] Bo qua bang nguon khong ton tai: " + table.getTableName());
+                    continue;
+                }
                 long rowCount = countRowsForTable(sourceConn, table, sourceDialect);
             int fkLevel = fkLevels.getOrDefault(table, 0);
             plans.add(new TableMigrationPlan(table, rowCount, i, fkLevel));
@@ -839,7 +958,8 @@ public class MigrationWorker extends SwingWorker<Void, String> {
     }
 
     private long countRowsForTable(Connection sourceConn, TableDefinition table, SqlDialect sourceDialect) {
-        String countSql = "SELECT COUNT(*) FROM " + sourceDialect.quoteIdentifier(table.getTableName());
+        String sourceTableName = normalizeTableNameForDialect(sourceDialect, table.getTableName());
+        String countSql = "SELECT COUNT(*) FROM " + qualifyTableName(sourceDialect, sourceSchema, sourceTableName);
         try (Statement statement = sourceConn.createStatement();
              ResultSet rs = statement.executeQuery(countSql)) {
             if (rs.next()) {
@@ -869,16 +989,56 @@ public class MigrationWorker extends SwingWorker<Void, String> {
             throw new IllegalArgumentException("Target dialect khong hop le");
         }
 
-        String targetTableName = table.getTableName();
+        String targetTableName = normalizeTableNameForDialect(targetDialect, table.getTableName());
+        String qualifiedTable = qualifyTableName(targetDialect, targetSchema, targetTableName);
         if (targetDialect instanceof OracleDialect) {
-            targetTableName = targetTableName.toUpperCase(Locale.ROOT);
+            return "SELECT 1 FROM " + qualifiedTable + " WHERE ROWNUM = 1";
         }
+        return "SELECT 1 FROM " + qualifiedTable + " LIMIT 1";
+    }
 
-        String quotedTable = targetDialect.quoteIdentifier(targetTableName);
-        if (targetDialect instanceof OracleDialect) {
-            return "SELECT 1 FROM " + quotedTable + " WHERE ROWNUM = 1";
+    private boolean doesTableExist(
+            Connection conn,
+            SqlDialect dialect,
+            String schema,
+            String tableName
+    ) {
+        String normalizedTableName = normalizeTableNameForDialect(dialect, tableName);
+        String probeSql = "SELECT 1 FROM "
+                + qualifyTableName(dialect, schema, normalizedTableName)
+                + " WHERE 1 = 0";
+
+        try (Statement statement = conn.createStatement()) {
+            statement.executeQuery(probeSql);
+            return true;
+        } catch (SQLException ex) {
+            if (isTableNotExistsError(ex)) {
+                return false;
+            }
+
+            publish("  -> [WARN] Khong the xac minh su ton tai cua bang " + tableName
+                    + ". Se tiep tuc migrate de tranh bo sot. Ly do: " + ex.getMessage());
+            return true;
         }
-        return "SELECT 1 FROM " + quotedTable + " LIMIT 1";
+    }
+
+    private static String normalizeTableNameForDialect(SqlDialect dialect, String tableName) {
+        if (tableName == null) {
+            return "";
+        }
+        String trimmed = tableName.trim();
+        if (dialect instanceof OracleDialect) {
+            return trimmed.toUpperCase(Locale.ROOT);
+        }
+        return trimmed;
+    }
+
+    private static String qualifyTableName(SqlDialect dialect, String schema, String tableName) {
+        String quotedTable = dialect.quoteIdentifier(tableName);
+        if (schema == null || schema.isBlank()) {
+            return quotedTable;
+        }
+        return dialect.quoteIdentifier(schema) + "." + quotedTable;
     }
 
     private record TableMigrationPlan(TableDefinition table, long rowCount, int originalOrder, int fkLevel) {}
@@ -888,6 +1048,7 @@ public class MigrationWorker extends SwingWorker<Void, String> {
             int transferredRows,
             int skippedRows,
             boolean limitReached,
+            boolean skippedTable,
             boolean success,
             String errorMessage
     ) {
@@ -897,7 +1058,7 @@ public class MigrationWorker extends SwingWorker<Void, String> {
                 int skippedRows,
                 boolean limitReached
         ) {
-            return new TableTransferOutcome(tableName, transferredRows, skippedRows, limitReached, true, null);
+            return new TableTransferOutcome(tableName, transferredRows, skippedRows, limitReached, false, true, null);
         }
 
         private static TableTransferOutcome failed(String tableName, String errorMessage) {
@@ -907,9 +1068,44 @@ public class MigrationWorker extends SwingWorker<Void, String> {
                     0,
                     false,
                     false,
+                    false,
                     errorMessage == null ? "unknown error" : errorMessage
             );
         }
+
+        private static TableTransferOutcome skippedTableNotExists(String tableName, String errorMessage) {
+            return new TableTransferOutcome(
+                    tableName,
+                    0,
+                    0,
+                    false,
+                    true,
+                    true,
+                    errorMessage == null ? "ORA-00942: table or view does not exist" : errorMessage
+            );
+        }
+    }
+
+    private static SQLException extractSqlException(Throwable throwable) {
+        if (throwable == null) {
+            return null;
+        }
+
+        if (throwable instanceof SQLException sqlException) {
+            return sqlException;
+        }
+
+        Throwable current = throwable.getCause();
+        int depth = 0;
+        while (current != null && depth < 10) {
+            if (current instanceof SQLException sqlException) {
+                return sqlException;
+            }
+            current = current.getCause();
+            depth++;
+        }
+
+        return null;
     }
 
     private DataTransferService.TransferResult transferTableWithRetry(
@@ -933,6 +1129,8 @@ public class MigrationWorker extends SwingWorker<Void, String> {
 
                 configurePostgresSchema(transferSourceConn, sourceConfig, sourceSchema, false);
                 configurePostgresSchema(transferTargetConn, targetConfig, targetSchema, true);
+                configureOracleSchema(transferSourceConn, sourceConfig, sourceSchema);
+                configureOracleSchema(transferTargetConn, targetConfig, targetSchema);
 
                 if (attempt > 1) {
                     publish("  -> Retry bảng " + table.getTableName() + " lần " + attempt + "/" + attempts + "...");
@@ -954,7 +1152,7 @@ public class MigrationWorker extends SwingWorker<Void, String> {
                             publish("    -> Batch " + tableName
                                     + ": +" + justTransferred
                                     + " dòng, tổng=" + totalTransferred
-                                    + ", bềEqua=" + totalSkipped);
+                                    + ", bỏ qua=" + totalSkipped);
                         }
                 );
             } catch (SQLException e) {
@@ -1052,6 +1250,30 @@ public class MigrationWorker extends SwingWorker<Void, String> {
         return normalized;
     }
 
+    private boolean isOracleToOracleDirectDdlMode(SqlDialect targetDialect) {
+        return sourceConfig != null
+                && targetConfig != null
+                && sourceConfig.getType() == DatabaseType.ORACLE
+                && targetConfig.getType() == DatabaseType.ORACLE
+                && targetDialect instanceof OracleDialect;
+    }
+
+    private static String prepareOracleRawDdl(String ddl, String sourceSchema, String targetSchema) {
+        String remapped = OracleDialect.remapSchemaPrefixSafely(ddl, sourceSchema, targetSchema);
+        return normalizeOracleRawDdlForJdbc(remapped);
+    }
+
+    private static String normalizeOracleRawDdlForJdbc(String ddl) {
+        String normalized = ddl == null ? "" : ddl.trim();
+        while (normalized.endsWith("/")) {
+            normalized = normalized.substring(0, normalized.length() - 1).trim();
+        }
+        while (normalized.endsWith(";")) {
+            normalized = normalized.substring(0, normalized.length() - 1).trim();
+        }
+        return normalized;
+    }
+
     private void configurePostgresSchema(
             Connection conn,
             DatabaseConfig config,
@@ -1084,6 +1306,29 @@ public class MigrationWorker extends SwingWorker<Void, String> {
         return "\"" + identifier.replace("\"", "\"\"") + "\"";
     }
 
+    private void configureOracleSchema(
+            Connection conn,
+            DatabaseConfig config,
+            String schema
+    ) throws SQLException {
+        if (conn == null || config == null || config.getType() != DatabaseType.ORACLE) {
+            return;
+        }
+
+        String effectiveSchema = schema == null ? "" : schema.trim();
+        if (effectiveSchema.isBlank()) {
+            return;
+        }
+
+        try (Statement statement = conn.createStatement()) {
+            statement.execute("ALTER SESSION SET CURRENT_SCHEMA = " + quoteOracleIdentifier(effectiveSchema));
+        }
+    }
+
+    private static String quoteOracleIdentifier(String identifier) {
+        return "\"" + identifier.replace("\"", "\"\"") + "\"";
+    }
+
     private static String normalizeRoutineSqlForJdbc(String sql, SqlDialect targetDialect) {
         String normalized = sql == null ? "" : sql.trim();
         if (normalized.isEmpty()) {
@@ -1106,6 +1351,26 @@ public class MigrationWorker extends SwingWorker<Void, String> {
         return "42P07".equals(sqlState)
                 || message.contains("already exists")
                 || message.contains("ora-00955");
+    }
+
+    private static boolean isOracleRawTableDdlIncompatibleError(SQLException e) {
+        String message = e.getMessage() == null ? "" : e.getMessage().toLowerCase(Locale.ROOT);
+        return message.contains("ora-00922")
+                || message.contains("ora-00933")
+                || message.contains("ora-00907")
+                || message.contains("ora-00904")
+                || message.contains("ora-65021");
+    }
+
+    private static String abbreviateSqlForLog(String sql) {
+        if (sql == null) {
+            return "";
+        }
+        String compact = sql.replace('\n', ' ').replace('\r', ' ').trim();
+        if (compact.length() <= 400) {
+            return compact;
+        }
+        return compact.substring(0, 400) + "...";
     }
 
     private static boolean isConstraintAlreadyExistsError(SQLException e) {
@@ -1337,9 +1602,29 @@ public class MigrationWorker extends SwingWorker<Void, String> {
             publish("  -> Oracle -> PostgreSQL: bat dau transform PL/SQL...");
         }
 
+        boolean oracleToOracleDirectDdlMode = isOracleToOracleDirectDdlMode(targetDialect);
+
         try (Statement stmt = targetConn.createStatement()) {
             for (FunctionDefinition fn : functions) {
                 ensureNotCancelled();
+
+                if (oracleToOracleDirectDdlMode
+                        && fn.getDdlText() != null
+                        && !fn.getDdlText().isBlank()) {
+                    try {
+                        String directDdl = prepareOracleRawDdl(fn.getDdlText(), fn.getSourceSchema(), fn.getTargetSchema());
+                        stmt.execute(normalizeRoutineSqlForJdbc(directDdl, targetDialect));
+                        publish("  -> Da tao " + fn.getFunctionType() + " (DDL goc): " + fn.getFunctionName());
+                    } catch (SQLException e) {
+                        if (isFunctionAlreadyExistsError(e)) {
+                            publish("  -> Bo qua " + fn.getFunctionType() + " da ton tai: " + fn.getFunctionName());
+                        } else {
+                            publish("  -> LOI tao " + fn.getFunctionType() + " " + fn.getFunctionName()
+                                    + ": " + e.getMessage());
+                        }
+                    }
+                    continue;
+                }
 
                 // Detect unsupported features
                 if (fn.getFunctionBody() != null) {
@@ -1397,9 +1682,29 @@ public class MigrationWorker extends SwingWorker<Void, String> {
             publish("  -> Oracle -> PostgreSQL: bat dau transform trigger body...");
         }
 
+        boolean oracleToOracleDirectDdlMode = isOracleToOracleDirectDdlMode(targetDialect);
+
         try (Statement stmt = targetConn.createStatement()) {
             for (TriggerDefinition trig : triggers) {
                 ensureNotCancelled();
+
+                if (oracleToOracleDirectDdlMode
+                        && trig.getDdlText() != null
+                        && !trig.getDdlText().isBlank()) {
+                    try {
+                        String directDdl = prepareOracleRawDdl(trig.getDdlText(), trig.getSourceSchema(), trig.getTargetSchema());
+                        stmt.execute(normalizeRoutineSqlForJdbc(directDdl, targetDialect));
+                        publish("  -> Da tao trigger (DDL goc): " + trig.getTriggerName());
+                    } catch (SQLException e) {
+                        if (isTriggerAlreadyExistsError(e)) {
+                            publish("  -> Bo qua trigger da ton tai: " + trig.getTriggerName());
+                        } else {
+                            publish("  -> LOI tao trigger " + trig.getTriggerName()
+                                    + ": " + e.getMessage());
+                        }
+                    }
+                    continue;
+                }
 
                 // Detect unsupported features
                 if (trig.getTriggerBody() != null) {
@@ -1509,6 +1814,10 @@ public class MigrationWorker extends SwingWorker<Void, String> {
     ) throws SQLException {
         try {
             List<ViewDefinition> views = extractor.extractViewDefinitionsWithDependencySort(conn, schema, dbType);
+            for (ViewDefinition view : views) {
+                view.setSourceSchema(schema);
+                view.setTargetSchema(targetSchema);
+            }
             publish("  -> Tim thay " + views.size() + " views (da sort theo dependency).");
             return views;
         } catch (IllegalStateException e) {
@@ -1553,14 +1862,43 @@ public class MigrationWorker extends SwingWorker<Void, String> {
             publish("  -> Oracle -> PostgreSQL: bat dau transform view body...");
         }
 
+        boolean oracleToOracleDirectDdlMode = isOracleToOracleDirectDdlMode(targetDialect);
+
         try (Statement stmt = targetConn.createStatement()) {
             int total = filtered.size();
             for (int i = 0; i < total; i++) {
                 ensureNotCancelled();
                 ViewDefinition vd = filtered.get(i);
+                vd.setSourceSchema(sourceSchema);
+                vd.setTargetSchema(targetSchema);
                 publish("  -> Tao view: " + vd.getViewName() + " (" + (i + 1) + "/" + total + ")");
 
                 try {
+                    if (oracleToOracleDirectDdlMode
+                            && vd.getDdlText() != null
+                            && !vd.getDdlText().isBlank()) {
+                        String directDdl = prepareOracleRawDdl(vd.getDdlText(), vd.getSourceSchema(), vd.getTargetSchema());
+                        if (replaceExistingViews) {
+                            String qualifiedViewName = targetSchema != null && !targetSchema.isBlank()
+                                    ? targetDialect.quoteIdentifier(targetSchema)
+                                            + "." + targetDialect.quoteIdentifier(vd.getViewName())
+                                    : targetDialect.quoteIdentifier(vd.getViewName());
+
+                            String dropSql = "DROP VIEW " + qualifiedViewName;
+                            try {
+                                stmt.execute(dropSql);
+                            } catch (SQLException dropEx) {
+                                if (!isViewNotExistsError(dropEx)) {
+                                    throw dropEx;
+                                }
+                            }
+                        }
+
+                        stmt.execute(normalizeRoutineSqlForJdbc(directDdl, targetDialect));
+                        publish("  -> Da tao view (DDL goc): " + vd.getViewName());
+                        continue;
+                    }
+
                     // 1. Transform view body
                     String transformedBody = transformViewBodySwing(
                             vd.getSelectClause(),
@@ -1812,7 +2150,7 @@ public class MigrationWorker extends SwingWorker<Void, String> {
             Thread.currentThread().interrupt();
             ui.appendLog("\n=== THẤT BẠI: Tiến trình bềEgián đoạn ===");
         } catch (ExecutionException e) {
-            ui.appendLog("\n=== THẤT BẠI: Quá trình bềEgián đoạn ===");
+            ui.appendLog("\n=== THẤT BẠI: Quá trình bị gián đoạn ===");
         } finally {
             // MềEkhóa lại nút Start Migration khi xong việc
             ui.enableStartButton(true);
