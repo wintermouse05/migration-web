@@ -74,6 +74,7 @@ public class MigrationAppUI extends JFrame {
     private JRadioButton optCopyAll, optStructureOnly, optDataOnly;
     private JCheckBox chkTruncateTarget, chkCopyNewOnly, chkCopyOnlyTargetEmptyTables;
     private JCheckBox chkExportInsertSqlFiles;
+    private JCheckBox chkOnlyExportInsertSqlFiles;
     private JButton btnBrowseInsertSqlDir;
     private JTextField limitDataField, batchSizeField;
     private JTextField exportInsertSqlDirField;
@@ -297,33 +298,45 @@ public class MigrationAppUI extends JFrame {
         if (chkExportInsertSqlFiles != null) {
             chkExportInsertSqlFiles.addActionListener(e -> updateModeDependentOptionsState());
         }
+        if (chkOnlyExportInsertSqlFiles != null) {
+            chkOnlyExportInsertSqlFiles.addActionListener(e -> updateModeDependentOptionsState());
+        }
     }
 
     private void updateModeDependentOptionsState() {
         boolean structureOnly = optStructureOnly != null && optStructureOnly.isSelected();
         boolean dataOnly = optDataOnly != null && optDataOnly.isSelected();
 
+        boolean allowDataOptions = !structureOnly;
+        boolean allowExport = allowDataOptions
+                && chkExportInsertSqlFiles != null
+                && chkExportInsertSqlFiles.isSelected();
+
+        if (chkOnlyExportInsertSqlFiles != null) {
+            chkOnlyExportInsertSqlFiles.setEnabled(allowExport);
+            if (!allowExport && chkOnlyExportInsertSqlFiles.isSelected()) {
+                chkOnlyExportInsertSqlFiles.setSelected(false);
+            }
+        }
+        boolean onlyExportSql = chkOnlyExportInsertSqlFiles != null && chkOnlyExportInsertSqlFiles.isSelected();
+
         if (chkTruncateTarget != null) {
-            chkTruncateTarget.setEnabled(!structureOnly);
+            chkTruncateTarget.setEnabled(allowDataOptions && !onlyExportSql);
         }
         if (chkCopyNewOnly != null) {
-            chkCopyNewOnly.setEnabled(!structureOnly);
+            chkCopyNewOnly.setEnabled(allowDataOptions && !onlyExportSql);
         }
         if (chkCopyOnlyTargetEmptyTables != null) {
-            chkCopyOnlyTargetEmptyTables.setEnabled(!structureOnly);
+            chkCopyOnlyTargetEmptyTables.setEnabled(allowDataOptions && !onlyExportSql);
         }
 
-        boolean allowDataOptions = !structureOnly;
         if (chkExportInsertSqlFiles != null) {
             chkExportInsertSqlFiles.setEnabled(allowDataOptions);
         }
         if (exportInsertSqlDirField != null) {
-            boolean allowExportDir = allowDataOptions
-                    && chkExportInsertSqlFiles != null
-                    && chkExportInsertSqlFiles.isSelected();
-            exportInsertSqlDirField.setEnabled(allowExportDir);
+            exportInsertSqlDirField.setEnabled(allowExport);
             if (btnBrowseInsertSqlDir != null) {
-                btnBrowseInsertSqlDir.setEnabled(allowExportDir);
+                btnBrowseInsertSqlDir.setEnabled(allowExport);
             }
         }
 
@@ -567,10 +580,12 @@ public class MigrationAppUI extends JFrame {
         chkCopyNewOnly = new JCheckBox("Copy only new records (by PK, skip duplicates)");
         chkCopyOnlyTargetEmptyTables = new JCheckBox("Copy data only for empty target tables");
         chkExportInsertSqlFiles = new JCheckBox("Export Oracle INSERT SQL files while copying data");
+        chkOnlyExportInsertSqlFiles = new JCheckBox("Only export SQL files (skip insert into target)");
         styleOptionToggle(chkTruncateTarget);
         styleOptionToggle(chkCopyNewOnly);
         styleOptionToggle(chkCopyOnlyTargetEmptyTables);
         styleOptionToggle(chkExportInsertSqlFiles);
+        styleOptionToggle(chkOnlyExportInsertSqlFiles);
         content.add(chkTruncateTarget);
         content.add(Box.createVerticalStrut(4));
         content.add(chkCopyNewOnly);
@@ -578,6 +593,8 @@ public class MigrationAppUI extends JFrame {
         content.add(chkCopyOnlyTargetEmptyTables);
         content.add(Box.createVerticalStrut(4));
         content.add(chkExportInsertSqlFiles);
+        content.add(Box.createVerticalStrut(4));
+        content.add(chkOnlyExportInsertSqlFiles);
         content.add(Box.createVerticalStrut(8));
 
         JPanel row2 = createInlineRowPanel();
@@ -939,6 +956,9 @@ public class MigrationAppUI extends JFrame {
         boolean copyNewOnly = chkCopyNewOnly.isSelected();
         boolean copyOnlyTargetEmptyTables = chkCopyOnlyTargetEmptyTables.isSelected();
         boolean exportInsertSqlFiles = chkExportInsertSqlFiles != null && chkExportInsertSqlFiles.isSelected();
+        boolean onlyExportInsertSqlFiles = chkOnlyExportInsertSqlFiles != null
+            && chkOnlyExportInsertSqlFiles.isSelected()
+            && exportInsertSqlFiles;
         String exportInsertSqlDir = exportInsertSqlDirField == null
             ? "migration-sql-export"
             : exportInsertSqlDirField.getText();
@@ -1023,6 +1043,7 @@ public class MigrationAppUI extends JFrame {
             + " | folder=" + ((exportInsertSqlDir == null || exportInsertSqlDir.isBlank())
             ? "migration-sql-export"
             : exportInsertSqlDir.trim()));
+        appendLog("Only export SQL files: " + onlyExportInsertSqlFiles);
         appendLog("Retry: enabled=" + retryEnabled + " attempts=" + retryMaxAttempts
                 + " delay=" + retryDelayMs + "ms backoff=" + retryBackoff);
         appendLog("Resume: enabled=" + resumeEnabled + " file=" + (resumeEnabled ? resumeStateFile : "N/A"));
@@ -1046,6 +1067,7 @@ public class MigrationAppUI extends JFrame {
                 copyNewOnly,
                 copyOnlyTargetEmptyTables,
                 exportInsertSqlFiles,
+                onlyExportInsertSqlFiles,
                 exportInsertSqlDir,
                 limitRows,
                 includeTables,

@@ -69,7 +69,13 @@ public class SqlGenerator {
             .append(qualifyTableName(targetDialect, targetSchema, table.getTableName()))
             .append(" (")
             .append(colNames)
-            .append(") VALUES (")
+            .append(")");
+
+        if (targetDialect instanceof PostgresDialect && requiresPostgresOverridingSystemValue(table)) {
+            sql.append(" OVERRIDING SYSTEM VALUE");
+        }
+
+        sql.append(" VALUES (")
             .append(placeholders)
             .append(")");
 
@@ -91,6 +97,18 @@ public class SqlGenerator {
         }
 
         return sql.toString();
+    }
+
+    private static boolean requiresPostgresOverridingSystemValue(TableDefinition table) {
+        if (table == null || table.getColumns() == null) {
+            return false;
+        }
+        for (ColumnDefinition column : table.getColumns()) {
+            if (column != null && column.isIdentityAlways()) {
+                return true;
+            }
+        }
+        return false;
     }
 
     public String buildExistsByPrimaryKeySql(TableDefinition table) {

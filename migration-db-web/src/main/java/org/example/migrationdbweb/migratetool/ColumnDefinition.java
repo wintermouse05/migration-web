@@ -11,6 +11,7 @@ public class ColumnDefinition {
     private int scale;
     private boolean isNullable;
     private boolean isAutoIncrement;
+    private boolean identityAlways;
     private boolean charLengthSemantics;
 
     public ColumnDefinition(String name, int jdbcType, String typeName, int size, boolean isNullable, boolean isAutoIncrement) {

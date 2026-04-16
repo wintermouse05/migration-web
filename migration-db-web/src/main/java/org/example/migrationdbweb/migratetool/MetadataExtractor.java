@@ -54,6 +54,11 @@ public class MetadataExtractor {
     ) throws SQLException {
         TableDefinition tableDef = new TableDefinition(tableName);
         tableDef.setSourceSchema(schema);
+        if (isPostgreSqlConnection(conn)) {
+            tableDef.setSourceDialect(DatabaseType.POSTGRESQL);
+        } else if (isOracleConnection(conn)) {
+            tableDef.setSourceDialect(DatabaseType.ORACLE);
+        }
         DatabaseMetaData metaData = conn.getMetaData();
         try (ResultSet rsColumns = metaData.getColumns(null, schema, tableName, "%")) {
             while (rsColumns.next()) {
@@ -77,6 +82,10 @@ public class MetadataExtractor {
                 );
                 tableDef.addColumn(colDef);
             }
+        }
+
+        if (isPostgreSqlConnection(conn)) {
+            enrichPostgresIdentityGeneration(conn, schema, tableName, tableDef);
         }
 
         if (includeStructuralMetadata) {
@@ -126,6 +135,24 @@ public class MetadataExtractor {
                 }
             } catch (SQLException ex) {
                 System.err.println("WARN: DBMS_METADATA unavailable for table FKs "
+                        + schema + "." + tableName + ": " + ex.getMessage());
+            }
+        }
+
+        if (includeStructuralMetadata && isPostgreSqlConnection(conn)) {
+            try {
+                tableDef.setDdlText(extractPostgresTableDdl(conn, schema, tableName));
+            } catch (SQLException ex) {
+                System.err.println("WARN: Khong the trich xuat PostgreSQL table DDL cho "
+                        + schema + "." + tableName + ": " + ex.getMessage());
+            }
+
+            try {
+                for (String fkDdl : extractPostgresForeignKeyDdls(conn, schema, tableName)) {
+                    tableDef.addForeignKeyDdl(fkDdl);
+                }
+            } catch (SQLException ex) {
+                System.err.println("WARN: Khong the trich xuat PostgreSQL FK DDL cho "
                         + schema + "." + tableName + ": " + ex.getMessage());
             }
         }
@@ -257,6 +284,53 @@ public class MetadataExtractor {
             return conn.getMetaData().getDatabaseProductName().toLowerCase(Locale.ROOT).contains("postgresql");
         } catch (SQLException e) {
             return false;
+        }
+    }
+
+    private static void enrichPostgresIdentityGeneration(
+            Connection conn,
+            String schema,
+            String tableName,
+            TableDefinition tableDef
+    ) {
+        if (!isPostgreSqlConnection(conn) || tableDef == null || tableDef.getColumns().isEmpty()) {
+            return;
+        }
+        if (schema == null || schema.isBlank() || tableName == null || tableName.isBlank()) {
+            return;
+        }
+
+        String sql = """
+            SELECT column_name, identity_generation
+            FROM information_schema.columns
+            WHERE table_schema = ?
+              AND table_name = ?
+              AND identity_generation IS NOT NULL
+            """;
+
+        Map<String, String> identityGenerationByColumn = new HashMap<>();
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setString(1, schema);
+            ps.setString(2, tableName);
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    String col = rs.getString("column_name");
+                    String generation = rs.getString("identity_generation");
+                    if (col != null && generation != null) {
+                        identityGenerationByColumn.put(col.toUpperCase(Locale.ROOT), generation);
+                    }
+                }
+            }
+        } catch (SQLException ignored) {
+            return;
+        }
+
+        for (ColumnDefinition column : tableDef.getColumns()) {
+            if (column == null || column.getName() == null) {
+                continue;
+            }
+            String generation = identityGenerationByColumn.get(column.getName().toUpperCase(Locale.ROOT));
+            column.setIdentityAlways("ALWAYS".equalsIgnoreCase(generation));
         }
     }
 
@@ -430,6 +504,8 @@ public class MetadataExtractor {
                 System.err.println("WARN: Khong doc duoc check option cho view "
                         + schema + "." + viewName + ": " + ex.getMessage());
             }
+
+            ddlText = buildPostgresCreateViewDdl(schema, viewName, selectClause, checkOption);
         }
 
         if ((selectClause == null || selectClause.isBlank())
@@ -545,6 +621,7 @@ public class MetadataExtractor {
                     }
                 }
             }
+
         }
         return dependencyMap;
     }
@@ -672,17 +749,36 @@ public class MetadataExtractor {
             ps.setString(2, sequenceName);
             try (ResultSet rs = ps.executeQuery()) {
                 if (rs.next()) {
+                    String seqName = rs.getString("sequence_name");
+                    long startValue = toRequiredLongSafely(rs, "start_value", 1L, sequenceName);
+                    long incrementBy = toRequiredLongSafely(rs, "increment", 1L, sequenceName);
+                    Long minValue = toNullableLongSafely(rs, "minimum_value", sequenceName);
+                    Long maxValue = toNullableLongSafely(rs, "maximum_value", sequenceName);
+                    Long cacheSize = toNullableLongSafely(rs, "cache_size", sequenceName);
+                    boolean cycle = "YES".equalsIgnoreCase(rs.getString("cycle_option"));
+                    String ddlText = buildPostgresCreateSequenceDdl(
+                            schema,
+                            seqName,
+                            startValue,
+                            incrementBy,
+                            minValue,
+                            maxValue,
+                            cacheSize,
+                            cycle
+                    );
+
                     return SequenceDefinition.builder()
-                            .sequenceName(rs.getString("sequence_name"))
+                            .sequenceName(seqName)
                             .schema(schema)
                             .sourceDialect(DatabaseType.POSTGRESQL)
-                            .startValue(toRequiredLongSafely(rs, "start_value", 1L, sequenceName))
-                            .incrementBy(toRequiredLongSafely(rs, "increment", 1L, sequenceName))
-                            .minValue(toNullableLongSafely(rs, "minimum_value", sequenceName))
-                            .maxValue(toNullableLongSafely(rs, "maximum_value", sequenceName))
-                            .cacheSize(toNullableLongSafely(rs, "cache_size", sequenceName))
-                            .cycle("YES".equalsIgnoreCase(rs.getString("cycle_option")))
+                            .startValue(startValue)
+                            .incrementBy(incrementBy)
+                            .minValue(minValue)
+                            .maxValue(maxValue)
+                            .cacheSize(cacheSize)
+                            .cycle(cycle)
                             .sourceSchema(schema)
+                            .ddlText(ddlText)
                             .build();
                 }
             }
@@ -958,6 +1054,7 @@ public class MetadataExtractor {
                                 .indexTypeName(indexMethod)
                                 .sourceDialect(DatabaseType.POSTGRESQL)
                                 .sourceSchema(schema)
+                                .ddlText(withTrailingSemicolon(indexDef))
                                 .systemIndex(system)
                                 .build();
                     }
@@ -1016,10 +1113,316 @@ public class MetadataExtractor {
                         .indexTypeName(indexMethod)
                         .sourceDialect(DatabaseType.POSTGRESQL)
                         .sourceSchema(schema)
+                        .ddlText(withTrailingSemicolon(indexDef))
                         .systemIndex(system)
                         .build();
             }
         }
+    }
+
+    private static String buildPostgresCreateViewDdl(
+            String schema,
+            String viewName,
+            String selectClause,
+            String checkOption
+    ) {
+        if (viewName == null || viewName.isBlank() || selectClause == null || selectClause.isBlank()) {
+            return null;
+        }
+
+        StringBuilder ddl = new StringBuilder();
+        ddl.append("CREATE OR REPLACE VIEW ");
+        if (schema != null && !schema.isBlank()) {
+            ddl.append(quotePostgresIdentifier(schema)).append(".");
+        }
+        ddl.append(quotePostgresIdentifier(viewName));
+        ddl.append(" AS\n");
+        ddl.append(selectClause.trim());
+        if (checkOption != null && !checkOption.isBlank()) {
+            ddl.append("\nWITH ").append(checkOption).append(" CHECK OPTION");
+        }
+        if (ddl.charAt(ddl.length() - 1) != ';') {
+            ddl.append(';');
+        }
+        return ddl.toString();
+    }
+
+    private static String buildPostgresCreateSequenceDdl(
+            String schema,
+            String sequenceName,
+            long startValue,
+            long incrementBy,
+            Long minValue,
+            Long maxValue,
+            Long cacheSize,
+            boolean cycle
+    ) {
+        if (sequenceName == null || sequenceName.isBlank()) {
+            return null;
+        }
+
+        StringBuilder ddl = new StringBuilder();
+        ddl.append("CREATE SEQUENCE ");
+        if (schema != null && !schema.isBlank()) {
+            ddl.append(quotePostgresIdentifier(schema)).append(".");
+        }
+        ddl.append(quotePostgresIdentifier(sequenceName));
+        ddl.append(" START WITH ").append(startValue);
+        ddl.append(" INCREMENT BY ").append(incrementBy);
+        if (minValue != null) {
+            ddl.append(" MINVALUE ").append(minValue);
+        }
+        if (maxValue != null) {
+            ddl.append(" MAXVALUE ").append(maxValue);
+        }
+        ddl.append(" CACHE ").append(cacheSize != null ? cacheSize : 1L);
+        ddl.append(cycle ? " CYCLE" : " NO CYCLE");
+        ddl.append(';');
+        return ddl.toString();
+    }
+
+    private String extractPostgresTableDdl(
+            Connection conn,
+            String schema,
+            String tableName
+    ) throws SQLException {
+        String rawDdl = extractPostgresTableDdlViaPgGetTabledef(conn, schema, tableName);
+        if (rawDdl != null && !rawDdl.isBlank()) {
+            return withTrailingSemicolon(rawDdl);
+        }
+
+        Long tableOid = null;
+        String oidSql = """
+            SELECT c.oid
+            FROM pg_class c
+            JOIN pg_namespace n ON n.oid = c.relnamespace
+            WHERE n.nspname = ?
+              AND c.relname = ?
+              AND c.relkind IN ('r', 'p')
+            """;
+        try (PreparedStatement ps = conn.prepareStatement(oidSql)) {
+            ps.setString(1, schema);
+            ps.setString(2, tableName);
+            try (ResultSet rs = ps.executeQuery()) {
+                if (rs.next()) {
+                    tableOid = rs.getLong("oid");
+                }
+            }
+        }
+
+        if (tableOid == null) {
+            return null;
+        }
+
+        List<String> ddlEntries = new ArrayList<>();
+        String columnSql = """
+            SELECT
+                a.attname,
+                pg_catalog.format_type(a.atttypid, a.atttypmod) AS data_type,
+                a.attnotnull,
+                pg_get_expr(ad.adbin, ad.adrelid) AS default_expr,
+                a.attidentity,
+                a.attgenerated
+            FROM pg_attribute a
+            LEFT JOIN pg_attrdef ad ON ad.adrelid = a.attrelid AND ad.adnum = a.attnum
+            WHERE a.attrelid = ?
+              AND a.attnum > 0
+              AND NOT a.attisdropped
+            ORDER BY a.attnum
+            """;
+
+        try (PreparedStatement ps = conn.prepareStatement(columnSql)) {
+            ps.setLong(1, tableOid);
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    String colName = rs.getString("attname");
+                    String dataType = rs.getString("data_type");
+                    boolean notNull = rs.getBoolean("attnotnull");
+                    String defaultExpr = rs.getString("default_expr");
+                    String identityFlag = rs.getString("attidentity");
+                    String generatedFlag = rs.getString("attgenerated");
+
+                    StringBuilder line = new StringBuilder();
+                    line.append("    ")
+                            .append(quotePostgresIdentifier(colName))
+                            .append(" ")
+                            .append(dataType);
+
+                    if ("a".equalsIgnoreCase(identityFlag)) {
+                        line.append(" GENERATED ALWAYS AS IDENTITY");
+                    } else if ("d".equalsIgnoreCase(identityFlag)) {
+                        line.append(" GENERATED BY DEFAULT AS IDENTITY");
+                    } else if ("s".equalsIgnoreCase(generatedFlag) && defaultExpr != null && !defaultExpr.isBlank()) {
+                        line.append(" GENERATED ALWAYS AS (")
+                                .append(defaultExpr.trim())
+                                .append(") STORED");
+                    } else if (defaultExpr != null && !defaultExpr.isBlank()) {
+                        line.append(" DEFAULT ").append(defaultExpr.trim());
+                    }
+
+                    if (notNull) {
+                        line.append(" NOT NULL");
+                    }
+
+                    ddlEntries.add(line.toString());
+                }
+            }
+        }
+
+        String constraintSql = """
+            SELECT conname, contype, pg_get_constraintdef(oid, true) AS def
+            FROM pg_constraint
+            WHERE conrelid = ?
+              AND contype IN ('p', 'u', 'c', 'x')
+            ORDER BY CASE contype
+                       WHEN 'p' THEN 0
+                       WHEN 'u' THEN 1
+                       WHEN 'c' THEN 2
+                       ELSE 3
+                     END,
+                     conname
+            """;
+        try (PreparedStatement ps = conn.prepareStatement(constraintSql)) {
+            ps.setLong(1, tableOid);
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    String conName = rs.getString("conname");
+                    String conDef = rs.getString("def");
+                    if (conDef == null || conDef.isBlank()) {
+                        continue;
+                    }
+                    ddlEntries.add("    CONSTRAINT " + quotePostgresIdentifier(conName) + " " + conDef.trim());
+                }
+            }
+        }
+
+        if (ddlEntries.isEmpty()) {
+            return null;
+        }
+
+        StringBuilder ddl = new StringBuilder();
+        ddl.append("CREATE TABLE ")
+                .append(quotePostgresIdentifier(schema))
+                .append(".")
+                .append(quotePostgresIdentifier(tableName))
+                .append(" (\n");
+
+        for (int i = 0; i < ddlEntries.size(); i++) {
+            ddl.append(ddlEntries.get(i));
+            if (i < ddlEntries.size() - 1) {
+                ddl.append(",\n");
+            } else {
+                ddl.append("\n");
+            }
+        }
+        ddl.append(");");
+        return ddl.toString();
+    }
+
+    private String extractPostgresTableDdlViaPgGetTabledef(
+            Connection conn,
+            String schema,
+            String tableName
+    ) throws SQLException {
+        String sql = """
+            SELECT pg_get_tabledef(c.oid) AS ddl_text
+            FROM pg_class c
+            JOIN pg_namespace n ON n.oid = c.relnamespace
+            WHERE n.nspname = ?
+              AND c.relname = ?
+              AND c.relkind IN ('r', 'p')
+            """;
+
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setString(1, schema);
+            ps.setString(2, tableName);
+            try (ResultSet rs = ps.executeQuery()) {
+                if (rs.next()) {
+                    String ddl = rs.getString("ddl_text");
+                    if (ddl != null && !ddl.isBlank()) {
+                        return ddl.trim();
+                    }
+                }
+            }
+        } catch (SQLException ex) {
+            String sqlState = ex.getSQLState() == null ? "" : ex.getSQLState();
+            String message = ex.getMessage() == null ? "" : ex.getMessage().toLowerCase(Locale.ROOT);
+            if ("42883".equals(sqlState)
+                    || message.contains("pg_get_tabledef")
+                    || message.contains("function") && message.contains("does not exist")) {
+                return null;
+            }
+            throw ex;
+        }
+
+        return null;
+    }
+
+    private List<String> extractPostgresForeignKeyDdls(
+            Connection conn,
+            String schema,
+            String tableName
+    ) throws SQLException {
+        if (schema == null || schema.isBlank() || tableName == null || tableName.isBlank()) {
+            return Collections.emptyList();
+        }
+
+        String sql = """
+            SELECT c.conname, pg_get_constraintdef(c.oid, true) AS condef
+            FROM pg_constraint c
+            JOIN pg_class t ON t.oid = c.conrelid
+            JOIN pg_namespace n ON n.oid = t.relnamespace
+            WHERE c.contype = 'f'
+              AND n.nspname = ?
+              AND t.relname = ?
+            ORDER BY c.conname
+            """;
+
+        List<String> ddls = new ArrayList<>();
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setString(1, schema);
+            ps.setString(2, tableName);
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    String conName = rs.getString("conname");
+                    String conDef = rs.getString("condef");
+                    if (conName == null || conName.isBlank() || conDef == null || conDef.isBlank()) {
+                        continue;
+                    }
+
+                    String ddl = "ALTER TABLE "
+                            + quotePostgresIdentifier(schema)
+                            + "."
+                            + quotePostgresIdentifier(tableName)
+                            + " ADD CONSTRAINT "
+                            + quotePostgresIdentifier(conName)
+                            + " "
+                            + conDef.trim()
+                            + ";";
+                    ddls.add(ddl);
+                }
+            }
+        }
+
+        return ddls;
+    }
+
+    private static String quotePostgresIdentifier(String identifier) {
+        if (identifier == null) {
+            return "\"\"";
+        }
+        return "\"" + identifier.replace("\"", "\"\"") + "\"";
+    }
+
+    private static String withTrailingSemicolon(String sql) {
+        if (sql == null) {
+            return null;
+        }
+        String trimmed = sql.trim();
+        if (trimmed.isEmpty()) {
+            return trimmed;
+        }
+        return trimmed.endsWith(";") ? trimmed : (trimmed + ";");
     }
 
     private IndexDefinition extractIndexDefinitionOracle(

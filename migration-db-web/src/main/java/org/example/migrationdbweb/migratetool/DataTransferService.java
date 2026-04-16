@@ -42,14 +42,25 @@ public class DataTransferService {
         private final Path outputDirectory;
         private final int rowsPerFile;
         private final int commitEveryRows;
+        private final boolean exportOnlyToFile;
 
         public InsertSqlExportOptions(Path outputDirectory, int rowsPerFile, int commitEveryRows) {
+            this(outputDirectory, rowsPerFile, commitEveryRows, false);
+        }
+
+        public InsertSqlExportOptions(
+                Path outputDirectory,
+                int rowsPerFile,
+                int commitEveryRows,
+                boolean exportOnlyToFile
+        ) {
             if (outputDirectory == null) {
                 throw new IllegalArgumentException("Output directory must not be null.");
             }
             this.outputDirectory = outputDirectory;
             this.rowsPerFile = Math.max(1, rowsPerFile);
             this.commitEveryRows = Math.max(1, commitEveryRows);
+            this.exportOnlyToFile = exportOnlyToFile;
         }
 
         public Path outputDirectory() {
@@ -62,6 +73,10 @@ public class DataTransferService {
 
         public int commitEveryRows() {
             return commitEveryRows;
+        }
+
+        public boolean exportOnlyToFile() {
+            return exportOnlyToFile;
         }
     }
 
@@ -229,6 +244,22 @@ public class DataTransferService {
             safeStartOffset = 0;
         }
 
+        int safeBatchSize = Math.max(1, batchSize);
+        Integer safeLimitRows = (limitRows != null && limitRows > 0) ? limitRows : null;
+        boolean exportOnlyToFile = insertSqlExportOptions != null && insertSqlExportOptions.exportOnlyToFile();
+
+        if (exportOnlyToFile) {
+            return transferTableDataExportOnly(
+                    sourceConn,
+                    table,
+                    safeBatchSize,
+                    safeLimitRows,
+                    safeStartOffset,
+                    insertSqlExportOptions,
+                    progressListener
+            );
+        }
+
         // Luon ORDER BY PK neu bang co PK de thu tu doc on dinh giua cac lan retry/resume.
         String selectSql = sqlGenerator.buildSelectSql(table, hasPrimaryKey);
         String insertSql = sqlGenerator.buildInsertSql(table);
@@ -241,8 +272,6 @@ public class DataTransferService {
         }
 
         int columnCount = table.getColumns().size();
-        int safeBatchSize = Math.max(1, batchSize);
-        Integer safeLimitRows = (limitRows != null && limitRows > 0) ? limitRows : null;
 
         // Tắt AutoCommit ềEcả hai phía đềEtối ưu hiệu suất và bật Streaming
         boolean originalSourceAutoCommit = sourceConn.getAutoCommit();
@@ -406,6 +435,105 @@ public class DataTransferService {
             // Khôi phục trạng thái ban đầu
             sourceConn.setAutoCommit(originalSourceAutoCommit);
             targetConn.setAutoCommit(originalTargetAutoCommit);
+        }
+    }
+
+    private TransferResult transferTableDataExportOnly(
+            Connection sourceConn,
+            TableDefinition table,
+            int safeBatchSize,
+            Integer safeLimitRows,
+            int safeStartOffset,
+            InsertSqlExportOptions insertSqlExportOptions,
+            TransferProgressListener progressListener
+    ) throws SQLException {
+        boolean hasPrimaryKey = !table.getPrimaryKeys().isEmpty();
+        String selectSql = sqlGenerator.buildSelectSql(table, hasPrimaryKey);
+        int columnCount = table.getColumns().size();
+
+        boolean originalSourceAutoCommit = sourceConn.getAutoCommit();
+        sourceConn.setAutoCommit(false);
+
+        System.out.println("Starting export-only SQL generation for table: " + table.getTableName());
+
+        try (OracleInsertScriptWriter insertScriptWriter = createOracleInsertScriptWriter(
+                    table,
+                    safeStartOffset,
+                    insertSqlExportOptions
+             );
+             Statement sourceStmt = sourceConn.createStatement(ResultSet.TYPE_FORWARD_ONLY, ResultSet.CONCUR_READ_ONLY)) {
+
+            int fetchSize = Math.min(500, Math.max(100, safeBatchSize / 10));
+            sourceStmt.setFetchSize(fetchSize);
+
+            try (ResultSet rs = sourceStmt.executeQuery(selectSql)) {
+                int totalTransferred = safeStartOffset;
+                int totalSkipped = 0;
+                int currentBatchCount = 0;
+                boolean limitReached = false;
+                int sourceRowsRead = 0;
+                List<String> pendingBatchSql = new ArrayList<>(safeBatchSize);
+
+                int skippedByOffset = 0;
+                while (skippedByOffset < safeStartOffset && rs.next()) {
+                    skippedByOffset++;
+                }
+                if (skippedByOffset > 0) {
+                    System.out.println("Resuming table " + table.getTableName() + ": skipped " + skippedByOffset + " already-exported rows.");
+                }
+
+                while (rs.next()) {
+                    sourceRowsRead++;
+                    if (safeLimitRows != null && totalTransferred >= safeLimitRows) {
+                        limitReached = true;
+                        break;
+                    }
+
+                    Object[] rowValues = new Object[columnCount];
+                    for (int i = 1; i <= columnCount; i++) {
+                        rowValues[i - 1] = rs.getObject(i);
+                    }
+
+                    pendingBatchSql.add(buildOracleInsertSql(table, rowValues));
+                    currentBatchCount++;
+                    totalTransferred++;
+
+                    if (currentBatchCount % safeBatchSize == 0) {
+                        insertScriptWriter.appendCommittedInserts(pendingBatchSql);
+                        pendingBatchSql.clear();
+                        if (progressListener != null) {
+                            progressListener.onBatchCommitted(table.getTableName(), currentBatchCount, totalTransferred, totalSkipped);
+                        }
+                        currentBatchCount = 0;
+                        System.out.println("  -> Exported " + totalTransferred + " rows...");
+                    }
+                }
+
+                if (currentBatchCount > 0) {
+                    insertScriptWriter.appendCommittedInserts(pendingBatchSql);
+                    pendingBatchSql.clear();
+                    if (progressListener != null) {
+                        progressListener.onBatchCommitted(table.getTableName(), currentBatchCount, totalTransferred, totalSkipped);
+                    }
+                    System.out.println("  -> Exported " + totalTransferred + " rows...");
+                }
+
+                if (sourceRowsRead == 0) {
+                    System.err.println("[DATA-WARN] Table " + table.getTableName()
+                            + " returned no rows from source query."
+                            + " Check schema/DB name and source data. SQL=" + selectSql);
+                }
+
+                System.out.println("Completed export-only SQL generation. Total rows exported: "
+                        + totalTransferred + " for table " + table.getTableName());
+
+                List<String> exportedSqlFiles = insertScriptWriter == null
+                        ? List.of()
+                        : insertScriptWriter.getGeneratedFileNames();
+                return new TransferResult(safeStartOffset, totalTransferred, totalSkipped, limitReached, exportedSqlFiles);
+            }
+        } finally {
+            sourceConn.setAutoCommit(originalSourceAutoCommit);
         }
     }
 

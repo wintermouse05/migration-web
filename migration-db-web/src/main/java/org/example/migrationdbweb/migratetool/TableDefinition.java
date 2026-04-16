@@ -5,6 +5,7 @@ import java.util.List;
 
 public class TableDefinition {
     private String tableName;
+    private DatabaseType sourceDialect;
     private List<ColumnDefinition> columns = new ArrayList<>();
     private List<String> primaryKeys = new ArrayList<>();
     private List<ForeignKeyDefinition> foreignKeys = new ArrayList<>();
@@ -35,6 +36,15 @@ public class TableDefinition {
     public String getTableName() {
         return tableName;
     }
+
+    public DatabaseType getSourceDialect() {
+        return sourceDialect;
+    }
+
+    public void setSourceDialect(DatabaseType sourceDialect) {
+        this.sourceDialect = sourceDialect;
+    }
+
     public List<ColumnDefinition> getColumns() {
         return columns;
     }

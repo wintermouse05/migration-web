@@ -107,6 +107,14 @@ public class PostgresDialect implements SqlDialect {
 
     @Override
     public String buildCreateTableSql(TableDefinition table) {
+        if (table != null
+                && table.getSourceDialect() == DatabaseType.POSTGRESQL
+                && table.getDdlText() != null
+                && !table.getDdlText().isBlank()) {
+            String ddl = remapSchemaPrefix(table.getDdlText(), table.getSourceSchema(), table.getTargetSchema());
+            return stripTrailingSemicolon(ddl);
+        }
+
         StringBuilder sql = new StringBuilder();
         sql.append("CREATE TABLE ").append(quoteIdentifier(table.getTableName())).append(" (\n");
 
@@ -144,6 +152,24 @@ public class PostgresDialect implements SqlDialect {
     public List<String> buildAddForeignKeySql(TableDefinition table) {
         List<String> alterStatements = new ArrayList<>();
 
+        if (table != null
+                && table.getSourceDialect() == DatabaseType.POSTGRESQL
+                && table.getForeignKeyDdls() != null
+                && !table.getForeignKeyDdls().isEmpty()) {
+            for (String fkDdl : table.getForeignKeyDdls()) {
+                if (fkDdl == null || fkDdl.isBlank()) {
+                    continue;
+                }
+                String remapped = remapSchemaPrefix(fkDdl, table.getSourceSchema(), table.getTargetSchema());
+                if (remapped != null && !remapped.isBlank()) {
+                    alterStatements.add(stripTrailingSemicolon(remapped));
+                }
+            }
+            if (!alterStatements.isEmpty()) {
+                return alterStatements;
+            }
+        }
+
         for (ForeignKeyDefinition fk : table.getForeignKeys()) {
             StringBuilder sql = new StringBuilder();
 
@@ -169,6 +195,14 @@ public class PostgresDialect implements SqlDialect {
 
     @Override
     public String buildCreateSequenceSql(SequenceDefinition seq) {
+        if (seq != null
+                && seq.getSourceDialect() == DatabaseType.POSTGRESQL
+                && seq.getDdlText() != null
+                && !seq.getDdlText().isBlank()) {
+            String ddl = remapSchemaPrefix(seq.getDdlText(), seq.getSourceSchema(), seq.getTargetSchema());
+            return stripTrailingSemicolon(ddl);
+        }
+
         StringBuilder sb = new StringBuilder();
         sb.append("CREATE SEQUENCE IF NOT EXISTS ");
         sb.append(quoteIdentifier(seq.getSequenceName()));
@@ -195,6 +229,16 @@ public class PostgresDialect implements SqlDialect {
     @Override
     public List<String> buildCreateIndexSql(IndexDefinition idx) {
         List<String> stmts = new ArrayList<>();
+
+        if (idx != null
+                && idx.getSourceDialect() == DatabaseType.POSTGRESQL
+                && idx.getDdlText() != null
+                && !idx.getDdlText().isBlank()) {
+            String ddl = remapSchemaPrefix(idx.getDdlText(), idx.getSourceSchema(), idx.getTargetSchema());
+            stmts.add(stripTrailingSemicolon(ddl));
+            return stmts;
+        }
+
         StringBuilder sb = new StringBuilder();
 
         // PostgreSQL không hỗ trợ BITMAP index
@@ -482,21 +526,18 @@ public class PostgresDialect implements SqlDialect {
     }
 
     private static String remapSchemaPrefix(String ddl, String sourceSchema, String targetSchema) {
-        if (ddl == null || ddl.isBlank()) {
-            return ddl;
+        return OracleDialect.remapSchemaPrefixSafely(ddl, sourceSchema, targetSchema);
+    }
+
+    private static String stripTrailingSemicolon(String sql) {
+        if (sql == null) {
+            return null;
         }
-        if (sourceSchema == null || targetSchema == null || sourceSchema.equalsIgnoreCase(targetSchema)) {
-            return ddl;
+        String trimmed = sql.trim();
+        if (trimmed.endsWith(";")) {
+            return trimmed.substring(0, trimmed.length() - 1);
         }
-        String remapped = ddl.replaceAll(
-                "(?i)\\b" + java.util.regex.Pattern.quote(sourceSchema) + "\\b\\s*\\.",
-                targetSchema + "."
-        );
-        remapped = remapped.replaceAll(
-                "(?i)\"\\s*" + java.util.regex.Pattern.quote(sourceSchema) + "\\s*\"\\s*\\.",
-                "\"" + targetSchema + "\"."
-        );
-        return remapped;
+        return trimmed;
     }
 
     /**
@@ -538,6 +579,13 @@ public class PostgresDialect implements SqlDialect {
 
     @Override
     public String buildCreateViewSql(ViewDefinition viewDef, String targetSchema) {
+        if (viewDef.getSourceDialect() == DatabaseType.POSTGRESQL
+                && viewDef.getDdlText() != null
+                && !viewDef.getDdlText().isBlank()) {
+            String ddl = remapSchemaPrefix(viewDef.getDdlText(), viewDef.getSourceSchema(), viewDef.getTargetSchema());
+            return stripTrailingSemicolon(ddl);
+        }
+
         // Postgres: pg_get_viewdef trả về SELECT clause thuần (không có CREATE VIEW)
         // Cần gắn CREATE OR REPLACE VIEW ... AS
         String select = viewDef.getSelectClause();

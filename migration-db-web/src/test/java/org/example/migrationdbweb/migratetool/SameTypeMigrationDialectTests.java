@@ -1,5 +1,6 @@
 package org.example.migrationdbweb.migratetool;
 
+import java.sql.Types;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -42,6 +43,100 @@ class SameTypeMigrationDialectTests {
         assertEquals(2, sqls.size());
         assertTrue(sqls.get(0).contains("archive.trg_audit_fn()"));
         assertTrue(sqls.get(1).contains("archive.orders"));
+    }
+
+    @Test
+    void shouldUseRawPostgresTableDdlForSameTypeMigration() {
+        TableDefinition table = new TableDefinition("orders");
+        table.setSourceDialect(DatabaseType.POSTGRESQL);
+        table.setSourceSchema("public");
+        table.setTargetSchema("archive");
+        table.setDdlText("CREATE TABLE public.orders (id bigint NOT NULL, CONSTRAINT orders_pkey PRIMARY KEY (id));");
+
+        String sql = new PostgresDialect().buildCreateTableSql(table);
+
+        assertTrue(sql.contains("archive.orders"));
+        assertTrue(sql.contains("PRIMARY KEY"));
+    }
+
+    @Test
+    void shouldUseRawPostgresSequenceDdlForSameTypeMigration() {
+        SequenceDefinition seq = SequenceDefinition.builder()
+                .sequenceName("orders_id_seq")
+                .sourceDialect(DatabaseType.POSTGRESQL)
+                .sourceSchema("public")
+                .targetSchema("archive")
+                .ddlText("CREATE SEQUENCE public.orders_id_seq START WITH 1 INCREMENT BY 1 NO CYCLE;")
+                .build();
+
+        String sql = new PostgresDialect().buildCreateSequenceSql(seq);
+
+        assertTrue(sql.contains("archive.orders_id_seq"));
+        assertTrue(sql.toUpperCase().contains("CREATE SEQUENCE"));
+    }
+
+    @Test
+    void shouldUseRawPostgresIndexDdlForSameTypeMigration() {
+        IndexDefinition idx = IndexDefinition.builder()
+                .indexName("idx_orders_customer")
+                .sourceDialect(DatabaseType.POSTGRESQL)
+                .sourceSchema("public")
+                .targetSchema("archive")
+                .ddlText("CREATE INDEX idx_orders_customer ON public.orders USING btree (customer_id);")
+                .build();
+
+        List<String> sqls = new PostgresDialect().buildCreateIndexSql(idx);
+
+        assertEquals(1, sqls.size());
+        assertTrue(sqls.get(0).contains("archive.orders"));
+    }
+
+    @Test
+    void shouldUseRawPostgresViewDdlForSameTypeMigration() {
+        ViewDefinition view = ViewDefinition.builder()
+                .viewName("v_orders")
+                .sourceDialect(DatabaseType.POSTGRESQL)
+                .sourceSchema("public")
+                .targetSchema("archive")
+                .ddlText("CREATE OR REPLACE VIEW public.v_orders AS SELECT id FROM public.orders;")
+                .build();
+
+        String sql = new PostgresDialect().buildCreateViewSql(view);
+
+        assertTrue(sql.contains("archive.v_orders"));
+        assertTrue(sql.contains("archive.orders"));
+    }
+
+    @Test
+    void shouldUseRawPostgresForeignKeyDdlForSameTypeMigration() {
+        TableDefinition table = new TableDefinition("orders");
+        table.setSourceDialect(DatabaseType.POSTGRESQL);
+        table.setSourceSchema("public");
+        table.setTargetSchema("archive");
+        table.addForeignKeyDdl("ALTER TABLE public.orders ADD CONSTRAINT orders_customer_fkey "
+                + "FOREIGN KEY (customer_id, tenant_id) REFERENCES public.customers(id, tenant_id) "
+                + "ON UPDATE CASCADE ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED;");
+
+        List<String> sqls = new PostgresDialect().buildAddForeignKeySql(table);
+
+        assertEquals(1, sqls.size());
+        assertTrue(sqls.get(0).contains("archive.orders"));
+        assertTrue(sqls.get(0).contains("archive.customers"));
+        assertTrue(sqls.get(0).toUpperCase().contains("DEFERRABLE INITIALLY DEFERRED"));
+    }
+
+    @Test
+    void shouldUseOverridingSystemValueForIdentityAlwaysColumns() {
+        TableDefinition table = new TableDefinition("orders");
+        table.addColumn(new ColumnDefinition("id", Types.BIGINT, "int8", 19, 0, false, true));
+        table.getColumns().get(0).setIdentityAlways(true);
+        table.addColumn(new ColumnDefinition("name", Types.VARCHAR, "varchar", 255, 0, true, false));
+        table.addPrimaryKey("id");
+
+        SqlGenerator generator = new SqlGenerator(new PostgresDialect(), new PostgresDialect(), "public", "archive");
+        String insertSql = generator.buildInsertSql(table);
+
+        assertTrue(insertSql.contains("OVERRIDING SYSTEM VALUE"));
     }
 
     @Test
