@@ -775,6 +775,11 @@ public class MigrationWebWorkerService {
             DatabaseType targetDbType,
             boolean replaceExisting
     ) throws SQLException {
+            boolean oracleToOracleDirectDdlMode = sourceDbType == DatabaseType.ORACLE
+                && targetDbType == DatabaseType.ORACLE
+                && vd.getDdlText() != null
+                && !vd.getDdlText().isBlank();
+
         // 1. Transform view body : schema replacement + Oracle→PG regex
         String transformedBody = transformViewBody(
                 vd.getSelectClause(), sourceSchema, targetSchema, sourceDbType, targetDbType
@@ -787,25 +792,21 @@ public class MigrationWebWorkerService {
                 .checkOption(vd.getCheckOption())
                 .sourceSchema(sourceSchema)
                 .targetSchema(targetSchema)
+                .ddlText(vd.getDdlText())
                 .build();
 
-        // 2. Build SQL  Epass targetSchema to ensure schema qualification via tokenizer
-        String createSql = targetDialect.buildCreateViewSql(vd, targetSchema);
-        if (createSql == null || createSql.isBlank()) {
-            throw new SQLException("Cannot build CREATE VIEW SQL for: " + vd.getViewName());
-        }
-        createSql = normalizeSqlForJdbc(createSql);
-
-        // 3. Execute
+        // 2. Execute
         try (Statement stmt = targetConn.createStatement()) {
+            String qualifiedViewName = buildQualifiedViewName(targetDialect, targetSchema, vd.getViewName());
+
             if (replaceExisting) {
                 // DROP trước (nếu tồn tại)
                 try {
                     String dropSql;
                     if ("OracleDialect".equals(targetDialect.getClass().getSimpleName())) {
-                        dropSql = "DROP VIEW " + targetDialect.quoteIdentifier(vd.getViewName());
+                        dropSql = "DROP VIEW " + qualifiedViewName;
                     } else {
-                        dropSql = "DROP VIEW IF EXISTS " + targetDialect.quoteIdentifier(vd.getViewName());
+                        dropSql = "DROP VIEW IF EXISTS " + qualifiedViewName;
                     }
                     stmt.execute(dropSql);
                 } catch (SQLException dropEx) {
@@ -814,6 +815,19 @@ public class MigrationWebWorkerService {
                     }
                 }
             }
+
+            if (oracleToOracleDirectDdlMode) {
+                String directDdl = prepareOracleRawDdl(vd.getDdlText(), sourceSchema, targetSchema);
+                stmt.execute(directDdl);
+                return true;
+            }
+
+            // Build SQL  Epass targetSchema to ensure schema qualification via tokenizer
+            String createSql = targetDialect.buildCreateViewSql(vd, targetSchema);
+            if (createSql == null || createSql.isBlank()) {
+                throw new SQLException("Cannot build CREATE VIEW SQL for: " + vd.getViewName());
+            }
+            createSql = normalizeSqlForJdbc(createSql);
 
             stmt.execute(createSql);
             return true;
@@ -825,6 +839,30 @@ public class MigrationWebWorkerService {
             }
             throw e;
         }
+    }
+
+    private static String buildQualifiedViewName(SqlDialect targetDialect, String targetSchema, String viewName) {
+        String quotedView = targetDialect.quoteIdentifier(viewName);
+        if (targetSchema == null || targetSchema.isBlank()) {
+            return quotedView;
+        }
+        return targetDialect.quoteIdentifier(targetSchema) + "." + quotedView;
+    }
+
+    private static String prepareOracleRawDdl(String ddl, String sourceSchema, String targetSchema) {
+        String remapped = OracleDialect.remapSchemaPrefixSafely(ddl, sourceSchema, targetSchema);
+        return normalizeOracleRawDdlForJdbc(remapped);
+    }
+
+    private static String normalizeOracleRawDdlForJdbc(String ddl) {
+        String normalized = ddl == null ? "" : ddl.trim();
+        while (normalized.endsWith("/")) {
+            normalized = normalized.substring(0, normalized.length() - 1).trim();
+        }
+        while (normalized.endsWith(";")) {
+            normalized = normalized.substring(0, normalized.length() - 1).trim();
+        }
+        return normalized;
     }
 
     /**

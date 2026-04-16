@@ -43,6 +43,15 @@ public class MetadataExtractor {
     }
 
     public TableDefinition extractTableDefinition(Connection conn, String schema, String tableName) throws SQLException {
+        return extractTableDefinition(conn, schema, tableName, true);
+    }
+
+    public TableDefinition extractTableDefinition(
+            Connection conn,
+            String schema,
+            String tableName,
+            boolean includeStructuralMetadata
+    ) throws SQLException {
         TableDefinition tableDef = new TableDefinition(tableName);
         tableDef.setSourceSchema(schema);
         DatabaseMetaData metaData = conn.getMetaData();
@@ -70,9 +79,11 @@ public class MetadataExtractor {
             }
         }
 
-        // Oracle VARCHAR2/CHAR can be declared in BYTE or CHAR semantics.
-        // Preserve this information so Oracle->Oracle DDL does not shrink multibyte text capacity.
-        enrichOracleColumnLengthSemantics(conn, schema, tableName, tableDef);
+        if (includeStructuralMetadata) {
+            // Oracle VARCHAR2/CHAR can be declared in BYTE or CHAR semantics.
+            // Preserve this information so Oracle->Oracle DDL does not shrink multibyte text capacity.
+            enrichOracleColumnLengthSemantics(conn, schema, tableName, tableDef);
+        }
 
         try (ResultSet rsPK = metaData.getPrimaryKeys(null, schema, tableName)) {
             while (rsPK.next()) {
@@ -101,7 +112,7 @@ public class MetadataExtractor {
             }
         }
 
-        if (isOracleConnection(conn)) {
+        if (includeStructuralMetadata && isOracleConnection(conn)) {
             try {
                 tableDef.setDdlText(extractOracleTableDdlViaDbmsMetadata(conn, schema, tableName));
             } catch (SQLException ex) {

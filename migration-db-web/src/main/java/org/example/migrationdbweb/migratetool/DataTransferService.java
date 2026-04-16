@@ -1,5 +1,13 @@
 package org.example.migrationdbweb.migratetool;
 
+import java.io.BufferedWriter;
+import java.io.IOException;
+import java.math.BigDecimal;
+import java.math.BigInteger;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
 import java.sql.BatchUpdateException;
 import java.sql.Connection;
 import java.sql.Date;
@@ -15,9 +23,12 @@ import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.LocalTime;
 import java.time.OffsetDateTime;
+import java.time.ZoneOffset;
 import java.time.ZonedDateTime;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
+import java.util.Locale;
 import java.util.UUID;
 
 public class DataTransferService {
@@ -27,17 +38,56 @@ public class DataTransferService {
         void onBatchCommitted(String tableName, int justTransferred, int totalTransferred, int totalSkipped);
     }
 
+    public static final class InsertSqlExportOptions {
+        private final Path outputDirectory;
+        private final int rowsPerFile;
+        private final int commitEveryRows;
+
+        public InsertSqlExportOptions(Path outputDirectory, int rowsPerFile, int commitEveryRows) {
+            if (outputDirectory == null) {
+                throw new IllegalArgumentException("Output directory must not be null.");
+            }
+            this.outputDirectory = outputDirectory;
+            this.rowsPerFile = Math.max(1, rowsPerFile);
+            this.commitEveryRows = Math.max(1, commitEveryRows);
+        }
+
+        public Path outputDirectory() {
+            return outputDirectory;
+        }
+
+        public int rowsPerFile() {
+            return rowsPerFile;
+        }
+
+        public int commitEveryRows() {
+            return commitEveryRows;
+        }
+    }
+
     public static final class TransferResult {
         private final int startOffset;
         private final int transferredRows;
         private final int skippedRows;
         private final boolean limitReached;
+        private final List<String> exportedSqlFiles;
 
         public TransferResult(int startOffset, int transferredRows, int skippedRows, boolean limitReached) {
+            this(startOffset, transferredRows, skippedRows, limitReached, List.of());
+        }
+
+        public TransferResult(
+                int startOffset,
+                int transferredRows,
+                int skippedRows,
+                boolean limitReached,
+                List<String> exportedSqlFiles
+        ) {
             this.startOffset = startOffset;
             this.transferredRows = transferredRows;
             this.skippedRows = skippedRows;
             this.limitReached = limitReached;
+            this.exportedSqlFiles = exportedSqlFiles == null ? List.of() : List.copyOf(exportedSqlFiles);
         }
 
         public int getStartOffset() {
@@ -54,6 +104,10 @@ public class DataTransferService {
 
         public boolean isLimitReached() {
             return limitReached;
+        }
+
+        public List<String> getExportedSqlFiles() {
+            return exportedSqlFiles;
         }
     }
 
@@ -116,6 +170,30 @@ public class DataTransferService {
             int startOffset,
             TransferProgressListener progressListener
     ) throws SQLException {
+        return transferTableData(
+            sourceConn,
+            targetConn,
+            table,
+            batchSize,
+            limitRows,
+            copyNewOnly,
+            startOffset,
+            null,
+            progressListener
+        );
+        }
+
+        public TransferResult transferTableData(
+            Connection sourceConn,
+            Connection targetConn,
+            TableDefinition table,
+            int batchSize,
+            Integer limitRows,
+            boolean copyNewOnly,
+            int startOffset,
+            InsertSqlExportOptions insertSqlExportOptions,
+            TransferProgressListener progressListener
+        ) throws SQLException {
             return transferTableDataInternal(
                 sourceConn,
                 targetConn,
@@ -124,6 +202,7 @@ public class DataTransferService {
                 limitRows,
                 copyNewOnly,
                 startOffset,
+            insertSqlExportOptions,
                 progressListener,
                 true
             );
@@ -137,6 +216,7 @@ public class DataTransferService {
                 Integer limitRows,
                 boolean copyNewOnly,
                 int startOffset,
+                InsertSqlExportOptions insertSqlExportOptions,
                 TransferProgressListener progressListener,
                 boolean allowDuplicateFallback
             ) throws SQLException {
@@ -173,7 +253,12 @@ public class DataTransferService {
         System.out.println("Starting data transfer for table: " + table.getTableName());
 
         // Sử dụng TYPE_FORWARD_ONLY và CONCUR_READ_ONLY đềEtối ưu hóa bềEnhềEkhi đọc
-        try (Statement sourceStmt = sourceConn.createStatement(ResultSet.TYPE_FORWARD_ONLY, ResultSet.CONCUR_READ_ONLY);
+           try (OracleInsertScriptWriter insertScriptWriter = createOracleInsertScriptWriter(
+                    table,
+                    safeStartOffset,
+                    insertSqlExportOptions
+               );
+               Statement sourceStmt = sourceConn.createStatement(ResultSet.TYPE_FORWARD_ONLY, ResultSet.CONCUR_READ_ONLY);
              PreparedStatement targetPstmt = targetConn.prepareStatement(insertSql);
              PreparedStatement existsByPkStmt = existsByPkSql == null ? null : targetConn.prepareStatement(existsByPkSql)) {
 
@@ -191,6 +276,9 @@ public class DataTransferService {
                 boolean limitReached = false;
                 int sourceRowsRead = 0;
                 List<Object[]> pendingBatchRows = new ArrayList<>(safeBatchSize);
+                List<String> pendingBatchSql = insertScriptWriter == null
+                    ? Collections.emptyList()
+                    : new ArrayList<>(safeBatchSize);
 
                 int skippedByOffset = 0;
                 while (skippedByOffset < safeStartOffset && rs.next()) {
@@ -234,12 +322,19 @@ public class DataTransferService {
                     // Đưa lệnh INSERT đã được gán giá trềEvào danh sách chềE(Batch)
                     targetPstmt.addBatch();
                     pendingBatchRows.add(rowValues);
+                    if (insertScriptWriter != null) {
+                        pendingBatchSql.add(buildOracleInsertSql(table, rowValues));
+                    }
                     currentBatchCount++;
                     totalTransferred++;
 
                     // Khi Batch đầy, tiến hành gửi sang DB đích và Commit
                     if (currentBatchCount % safeBatchSize == 0) {
                         executeBatchWithRetry(targetPstmt, targetConn, table.getTableName(), pendingBatchRows, table);
+                        if (insertScriptWriter != null && !pendingBatchSql.isEmpty()) {
+                            insertScriptWriter.appendCommittedInserts(pendingBatchSql);
+                            pendingBatchSql.clear();
+                        }
                         if (progressListener != null) {
                             progressListener.onBatchCommitted(table.getTableName(), currentBatchCount, totalTransferred, totalSkipped);
                         }
@@ -252,6 +347,10 @@ public class DataTransferService {
                 // Thực thi nốt những dòng còn dư cuối cùng (nếu sềEdòng không chia hết cho batchSize)
                 if (currentBatchCount > 0) {
                     executeBatchWithRetry(targetPstmt, targetConn, table.getTableName(), pendingBatchRows, table);
+                    if (insertScriptWriter != null && !pendingBatchSql.isEmpty()) {
+                        insertScriptWriter.appendCommittedInserts(pendingBatchSql);
+                        pendingBatchSql.clear();
+                    }
                     if (progressListener != null) {
                         progressListener.onBatchCommitted(table.getTableName(), currentBatchCount, totalTransferred, totalSkipped);
                     }
@@ -266,7 +365,10 @@ public class DataTransferService {
                 }
 
                 System.out.println("Completed. Total rows copied: " + totalTransferred + " for table " + table.getTableName());
-                return new TransferResult(safeStartOffset, totalTransferred, totalSkipped, limitReached);
+        List<String> exportedSqlFiles = insertScriptWriter == null
+            ? List.of()
+            : insertScriptWriter.getGeneratedFileNames();
+        return new TransferResult(safeStartOffset, totalTransferred, totalSkipped, limitReached, exportedSqlFiles);
             }
 
         } catch (SQLException e) {
@@ -288,6 +390,7 @@ public class DataTransferService {
                 limitRows,
                 true,
                 startOffset,
+                insertSqlExportOptions,
                 progressListener,
                 false
             );
@@ -303,6 +406,356 @@ public class DataTransferService {
             // Khôi phục trạng thái ban đầu
             sourceConn.setAutoCommit(originalSourceAutoCommit);
             targetConn.setAutoCommit(originalTargetAutoCommit);
+        }
+    }
+
+    private static OracleInsertScriptWriter createOracleInsertScriptWriter(
+            TableDefinition table,
+            int startOffset,
+            InsertSqlExportOptions insertSqlExportOptions
+    ) throws SQLException {
+        if (insertSqlExportOptions == null) {
+            return null;
+        }
+
+        try {
+            Files.createDirectories(insertSqlExportOptions.outputDirectory());
+            return new OracleInsertScriptWriter(
+                    insertSqlExportOptions.outputDirectory(),
+                    table.getTableName(),
+                    insertSqlExportOptions.rowsPerFile(),
+                    insertSqlExportOptions.commitEveryRows(),
+                    startOffset
+            );
+        } catch (IOException e) {
+            throw new SQLException(
+                    "Unable to initialize Oracle INSERT SQL writer for table " + table.getTableName(),
+                    e
+            );
+        }
+    }
+
+    private static String buildOracleInsertSql(TableDefinition table, Object[] rowValues) throws SQLException {
+        List<ColumnDefinition> columns = table.getColumns();
+        if (rowValues == null || rowValues.length != columns.size()) {
+            throw new SQLException("Cannot build Oracle INSERT SQL due to mismatched row values.");
+        }
+
+        StringBuilder sql = new StringBuilder();
+        sql.append("INSERT INTO ");
+        sql.append(buildQualifiedOracleTableName(table));
+        sql.append(" (");
+        for (int i = 0; i < columns.size(); i++) {
+            if (i > 0) {
+                sql.append(", ");
+            }
+            sql.append(quoteOracleIdentifier(columns.get(i).getName()));
+        }
+        sql.append(") VALUES (");
+
+        for (int i = 0; i < columns.size(); i++) {
+            if (i > 0) {
+                sql.append(", ");
+            }
+            sql.append(toOracleSqlLiteral(rowValues[i], columns.get(i)));
+        }
+
+        sql.append(");");
+        return sql.toString();
+    }
+
+    private static String buildQualifiedOracleTableName(TableDefinition table) {
+        String tableName = quoteOracleIdentifier(table.getTableName());
+        String schema = table.getTargetSchema();
+        if (schema == null || schema.isBlank()) {
+            return tableName;
+        }
+        return quoteOracleIdentifier(schema) + "." + tableName;
+    }
+
+    private static String quoteOracleIdentifier(String identifier) {
+        if (identifier == null || identifier.isBlank()) {
+            return "\"\"";
+        }
+        return "\"" + identifier.replace("\"", "\"\"") + "\"";
+    }
+
+    private static String toOracleSqlLiteral(Object value, ColumnDefinition column) throws SQLException {
+        if (value == null) {
+            return "NULL";
+        }
+
+        if (value instanceof CharSequence || value instanceof Character) {
+            return "'" + escapeSqlString(value.toString()) + "'";
+        }
+
+        if (value instanceof Boolean b) {
+            return b ? "1" : "0";
+        }
+
+        if (value instanceof byte[] bytes) {
+            return "HEXTORAW('" + toHex(bytes) + "')";
+        }
+
+        if (value instanceof BigDecimal bd) {
+            return bd.stripTrailingZeros().toPlainString();
+        }
+
+        if (value instanceof BigInteger bi) {
+            return bi.toString();
+        }
+
+        if (value instanceof Number number) {
+            if (number instanceof Double d) {
+                if (!Double.isFinite(d)) {
+                    return "'" + escapeSqlString(String.valueOf(d)) + "'";
+                }
+            }
+            if (number instanceof Float f) {
+                if (!Float.isFinite(f)) {
+                    return "'" + escapeSqlString(String.valueOf(f)) + "'";
+                }
+            }
+            return String.valueOf(number);
+        }
+
+        if (value instanceof Timestamp ts) {
+            return toOracleTimestampLiteral(ts.toLocalDateTime());
+        }
+
+        if (value instanceof Date d) {
+            return "DATE '" + d.toLocalDate() + "'";
+        }
+
+        if (value instanceof Time t) {
+            return toOracleTimeTimestampLiteral(t.toLocalTime());
+        }
+
+        if (value instanceof LocalDateTime ldt) {
+            return toOracleTimestampLiteral(ldt);
+        }
+
+        if (value instanceof LocalDate ld) {
+            return "DATE '" + ld + "'";
+        }
+
+        if (value instanceof LocalTime lt) {
+            return toOracleTimeTimestampLiteral(lt);
+        }
+
+        if (value instanceof OffsetDateTime odt) {
+            return toOracleTimestampLiteral(LocalDateTime.ofInstant(odt.toInstant(), ZoneOffset.UTC));
+        }
+
+        if (value instanceof ZonedDateTime zdt) {
+            return toOracleTimestampLiteral(LocalDateTime.ofInstant(zdt.toInstant(), ZoneOffset.UTC));
+        }
+
+        if (value instanceof Instant instant) {
+            return toOracleTimestampLiteral(LocalDateTime.ofInstant(instant, ZoneOffset.UTC));
+        }
+
+        if (isOracleSqlType(value)) {
+            try {
+                Timestamp timestamp = toTimestamp(value);
+                return toOracleTimestampLiteral(timestamp.toLocalDateTime());
+            } catch (SQLException ignored) {
+                try {
+                    Date date = toSqlDate(value);
+                    return "DATE '" + date.toLocalDate() + "'";
+                } catch (SQLException ignoredAgain) {
+                    // fall through to string literal fallback
+                }
+            }
+        }
+
+        if (column != null && column.getJdbcType() == Types.BOOLEAN && value instanceof Number number) {
+            return number.intValue() != 0 ? "1" : "0";
+        }
+
+        return "'" + escapeSqlString(value.toString()) + "'";
+    }
+
+    private static String toOracleTimestampLiteral(LocalDateTime localDateTime) {
+        String datePart = String.format(
+                Locale.ROOT,
+                "%04d-%02d-%02d %02d:%02d:%02d",
+                localDateTime.getYear(),
+                localDateTime.getMonthValue(),
+                localDateTime.getDayOfMonth(),
+                localDateTime.getHour(),
+                localDateTime.getMinute(),
+                localDateTime.getSecond()
+        );
+        String fractionPart = String.format(Locale.ROOT, "%09d", localDateTime.getNano());
+        return "TO_TIMESTAMP('" + datePart + "." + fractionPart + "', 'YYYY-MM-DD HH24:MI:SS.FF9')";
+    }
+
+    private static String toOracleTimeTimestampLiteral(LocalTime localTime) {
+        String timePart = String.format(
+                Locale.ROOT,
+                "%02d:%02d:%02d",
+                localTime.getHour(),
+                localTime.getMinute(),
+                localTime.getSecond()
+        );
+        String fractionPart = String.format(Locale.ROOT, "%09d", localTime.getNano());
+        return "TO_TIMESTAMP('1970-01-01 " + timePart + "." + fractionPart + "', 'YYYY-MM-DD HH24:MI:SS.FF9')";
+    }
+
+    private static String toHex(byte[] value) {
+        StringBuilder builder = new StringBuilder(value.length * 2);
+        for (byte b : value) {
+            builder.append(String.format(Locale.ROOT, "%02X", b));
+        }
+        return builder.toString();
+    }
+
+    private static String escapeSqlString(String text) {
+        return text.replace("'", "''");
+    }
+
+    private static final class OracleInsertScriptWriter implements AutoCloseable {
+        private final Path outputDirectory;
+        private final String tablePrefix;
+        private final int rowsPerFile;
+        private final int commitEveryRows;
+        private final List<String> generatedFileNames = new ArrayList<>();
+
+        private int currentFileIndex;
+        private int rowsWrittenInCurrentFile;
+        private int rowsSinceCommit;
+        private BufferedWriter writer;
+
+        private OracleInsertScriptWriter(
+                Path outputDirectory,
+                String tableName,
+                int rowsPerFile,
+                int commitEveryRows,
+                int startOffset
+        ) throws IOException {
+            this.outputDirectory = outputDirectory;
+            this.tablePrefix = sanitizeFilePrefix(tableName);
+            this.rowsPerFile = Math.max(1, rowsPerFile);
+            this.commitEveryRows = Math.max(1, commitEveryRows);
+
+            int safeOffset = Math.max(0, startOffset);
+            this.currentFileIndex = (safeOffset / this.rowsPerFile) + 1;
+            this.rowsWrittenInCurrentFile = safeOffset % this.rowsPerFile;
+            this.rowsSinceCommit = safeOffset % this.commitEveryRows;
+
+            int existingChunkCount = safeOffset == 0 ? 0 : ((safeOffset - 1) / this.rowsPerFile) + 1;
+            for (int i = 1; i <= existingChunkCount; i++) {
+                generatedFileNames.add(fileNameForIndex(i));
+            }
+
+            boolean append = safeOffset > 0 && rowsWrittenInCurrentFile > 0;
+            openWriter(append);
+        }
+
+        private void appendCommittedInserts(List<String> insertStatements) throws SQLException {
+            if (insertStatements == null || insertStatements.isEmpty()) {
+                return;
+            }
+
+            try {
+                for (String statement : insertStatements) {
+                    ensureCapacityForNextInsert();
+                    writer.write(statement);
+                    writer.newLine();
+
+                    rowsWrittenInCurrentFile++;
+                    rowsSinceCommit++;
+
+                    if (rowsSinceCommit >= commitEveryRows) {
+                        writer.write("COMMIT;");
+                        writer.newLine();
+                        rowsSinceCommit = 0;
+                    }
+                }
+            } catch (IOException e) {
+                throw new SQLException("Unable to write Oracle INSERT SQL file for table " + tablePrefix, e);
+            }
+        }
+
+        private void ensureCapacityForNextInsert() throws IOException {
+            if (rowsWrittenInCurrentFile < rowsPerFile) {
+                return;
+            }
+
+            closeCurrentFile(true);
+            currentFileIndex++;
+            rowsWrittenInCurrentFile = 0;
+            openWriter(false);
+        }
+
+        private void openWriter(boolean append) throws IOException {
+            Path filePath = outputDirectory.resolve(fileNameForIndex(currentFileIndex));
+            String fileName = filePath.getFileName().toString();
+            if (!generatedFileNames.contains(fileName)) {
+                generatedFileNames.add(fileName);
+            }
+
+            boolean appendMode = append && Files.exists(filePath);
+            writer = Files.newBufferedWriter(
+                    filePath,
+                    StandardCharsets.UTF_8,
+                    StandardOpenOption.CREATE,
+                    StandardOpenOption.WRITE,
+                    appendMode ? StandardOpenOption.APPEND : StandardOpenOption.TRUNCATE_EXISTING
+            );
+
+            if (!appendMode || Files.size(filePath) == 0L) {
+                writer.write("SET DEFINE OFF;");
+                writer.newLine();
+                writer.newLine();
+            } else {
+                writer.newLine();
+            }
+        }
+
+        private void closeCurrentFile(boolean rotating) throws IOException {
+            if (writer == null) {
+                return;
+            }
+
+            if (rowsSinceCommit > 0) {
+                writer.write("COMMIT;");
+                writer.newLine();
+                rowsSinceCommit = 0;
+            }
+
+            if (!rotating) {
+                writer.newLine();
+            }
+            writer.flush();
+            writer.close();
+            writer = null;
+        }
+
+        private String fileNameForIndex(int index) {
+            return tablePrefix + "_" + String.format(Locale.ROOT, "%02d", index) + ".sql";
+        }
+
+        private static String sanitizeFilePrefix(String tableName) {
+            if (tableName == null || tableName.isBlank()) {
+                return "table";
+            }
+            String sanitized = tableName.trim().replaceAll("[^A-Za-z0-9_]", "_");
+            return sanitized.isBlank() ? "table" : sanitized;
+        }
+
+        private List<String> getGeneratedFileNames() {
+            return List.copyOf(generatedFileNames);
+        }
+
+        @Override
+        public void close() throws SQLException {
+            try {
+                closeCurrentFile(false);
+            } catch (IOException e) {
+                throw new SQLException("Unable to finalize Oracle INSERT SQL files for table " + tablePrefix, e);
+            }
         }
     }
 
@@ -349,14 +802,15 @@ public class DataTransferService {
             } catch (SQLException e) {
                 targetConn.rollback();
                 if (!isRetryableException(e) || attempt == attempts) {
-                    String detail = buildSqlExceptionDetail(e);
+                    String detail = summarizePrimarySqlException(e);
                     if (isValueTooLargeException(e)) {
                         detail += " | Hint: ORA-12899 usually means target column length is smaller than source value"
                                 + " or Oracle BYTE/CHAR semantics mismatch."
-                                + " Recreate/alter target columns to match source definition before re-run.";
+                                + " Recreate/alter target columns to match source definition before re-run."
+                                + " In Data Only mode, migration does not alter target table structure.";
                     }
                     throw new SQLException(
-                        "Unable to execute batch for table " + tableName + " after " + attempt + " attempts. Details: " + detail,
+                        "Unable to execute batch for table " + tableName + " after " + attempt + " attempts. " + detail,
                             e
                     );
                 }
@@ -425,16 +879,7 @@ public class DataTransferService {
             if (current instanceof BatchUpdateException bue) {
                 int[] counts = bue.getUpdateCounts();
                 sb.append(", UpdateCounts=");
-                if (counts == null) {
-                    sb.append("null");
-                } else {
-                    sb.append("[");
-                    for (int i = 0; i < counts.length; i++) {
-                        if (i > 0) sb.append(",");
-                        sb.append(counts[i]);
-                    }
-                    sb.append("]");
-                }
+                sb.append(summarizeBatchUpdateCounts(counts));
             }
 
             SQLException next = current.getNextException();
@@ -446,6 +891,62 @@ public class DataTransferService {
         }
 
         return sb.toString();
+    }
+
+    private static String summarizePrimarySqlException(SQLException e) {
+        if (e == null) {
+            return "(no SQL error details)";
+        }
+
+        SQLException current = e;
+        while (current != null) {
+            String message = current.getMessage();
+            if (message != null && !message.isBlank()) {
+                return "SQLState=" + current.getSQLState()
+                        + ", ErrorCode=" + current.getErrorCode()
+                        + ", Message=" + abbreviate(message, 600);
+            }
+
+            SQLException next = current.getNextException();
+            if (next == null && current.getCause() instanceof SQLException causeSql) {
+                next = causeSql;
+            }
+            current = next;
+        }
+
+        return "(empty SQL error message)";
+    }
+
+    private static String summarizeBatchUpdateCounts(int[] counts) {
+        if (counts == null) {
+            return "null";
+        }
+
+        int preview = Math.min(20, counts.length);
+        StringBuilder sb = new StringBuilder();
+        sb.append("len=").append(counts.length).append(", preview=[");
+        for (int i = 0; i < preview; i++) {
+            if (i > 0) {
+                sb.append(',');
+            }
+            sb.append(counts[i]);
+        }
+        if (counts.length > preview) {
+            sb.append(",...");
+        }
+        sb.append(']');
+        return sb.toString();
+    }
+
+    private static String abbreviate(String text, int maxLength) {
+        if (text == null) {
+            return "";
+        }
+        String compact = text.replace('\n', ' ').replace('\r', ' ').trim();
+        if (compact.length() <= maxLength) {
+            return compact;
+        }
+        return compact.substring(0, maxLength) + "...";
     }
 
     private static boolean isRetryableException(SQLException e) {

@@ -32,6 +32,7 @@ import javax.swing.JButton;
 import javax.swing.JCheckBox;
 import javax.swing.JComboBox;
 import javax.swing.JComponent;
+import javax.swing.JFileChooser;
 import javax.swing.JFrame;
 import javax.swing.JLabel;
 import javax.swing.JOptionPane;
@@ -72,7 +73,10 @@ public class MigrationAppUI extends JFrame {
     // --- UI Fields: Migration mode ---
     private JRadioButton optCopyAll, optStructureOnly, optDataOnly;
     private JCheckBox chkTruncateTarget, chkCopyNewOnly, chkCopyOnlyTargetEmptyTables;
+    private JCheckBox chkExportInsertSqlFiles;
+    private JButton btnBrowseInsertSqlDir;
     private JTextField limitDataField, batchSizeField;
+    private JTextField exportInsertSqlDirField;
     private JTextField dataThreadsField;
     private JTextField includeTablesField, excludeTablesField;
 
@@ -290,6 +294,9 @@ public class MigrationAppUI extends JFrame {
         if (chkMigrateViews != null) {
             chkMigrateViews.addActionListener(e -> updateModeDependentOptionsState());
         }
+        if (chkExportInsertSqlFiles != null) {
+            chkExportInsertSqlFiles.addActionListener(e -> updateModeDependentOptionsState());
+        }
     }
 
     private void updateModeDependentOptionsState() {
@@ -304,6 +311,20 @@ public class MigrationAppUI extends JFrame {
         }
         if (chkCopyOnlyTargetEmptyTables != null) {
             chkCopyOnlyTargetEmptyTables.setEnabled(!structureOnly);
+        }
+
+        boolean allowDataOptions = !structureOnly;
+        if (chkExportInsertSqlFiles != null) {
+            chkExportInsertSqlFiles.setEnabled(allowDataOptions);
+        }
+        if (exportInsertSqlDirField != null) {
+            boolean allowExportDir = allowDataOptions
+                    && chkExportInsertSqlFiles != null
+                    && chkExportInsertSqlFiles.isSelected();
+            exportInsertSqlDirField.setEnabled(allowExportDir);
+            if (btnBrowseInsertSqlDir != null) {
+                btnBrowseInsertSqlDir.setEnabled(allowExportDir);
+            }
         }
 
         boolean allowDdlOptions = !dataOnly;
@@ -545,14 +566,18 @@ public class MigrationAppUI extends JFrame {
         chkTruncateTarget = new JCheckBox("Clear existing target data before migration (TRUNCATE)");
         chkCopyNewOnly = new JCheckBox("Copy only new records (by PK, skip duplicates)");
         chkCopyOnlyTargetEmptyTables = new JCheckBox("Copy data only for empty target tables");
+        chkExportInsertSqlFiles = new JCheckBox("Export Oracle INSERT SQL files while copying data");
         styleOptionToggle(chkTruncateTarget);
         styleOptionToggle(chkCopyNewOnly);
         styleOptionToggle(chkCopyOnlyTargetEmptyTables);
+        styleOptionToggle(chkExportInsertSqlFiles);
         content.add(chkTruncateTarget);
         content.add(Box.createVerticalStrut(4));
         content.add(chkCopyNewOnly);
         content.add(Box.createVerticalStrut(4));
         content.add(chkCopyOnlyTargetEmptyTables);
+        content.add(Box.createVerticalStrut(4));
+        content.add(chkExportInsertSqlFiles);
         content.add(Box.createVerticalStrut(8));
 
         JPanel row2 = createInlineRowPanel();
@@ -588,6 +613,16 @@ public class MigrationAppUI extends JFrame {
         styleOptionField(excludeTablesField);
         excludeTablesField.setPreferredSize(new Dimension(260, 26));
         content.add(createLabeledStretchFieldRow("Exclude tables (CSV):", excludeTablesField, 140));
+
+        content.add(Box.createVerticalStrut(6));
+        exportInsertSqlDirField = new JTextField("migration-sql-export", 28);
+        exportInsertSqlDirField.setToolTipText("Base folder for Oracle INSERT script files. A timestamp run folder will be created inside.");
+        styleOptionField(exportInsertSqlDirField);
+        exportInsertSqlDirField.setPreferredSize(new Dimension(260, 26));
+        btnBrowseInsertSqlDir = new JButton("Browse...");
+        btnBrowseInsertSqlDir.setFont(UI_FONT);
+        btnBrowseInsertSqlDir.addActionListener(e -> chooseInsertSqlFolderAction());
+        content.add(createLabeledFieldWithButtonRow("Insert SQL folder:", exportInsertSqlDirField, btnBrowseInsertSqlDir, 140));
 
         section.add(content, BorderLayout.NORTH);
         return section;
@@ -772,6 +807,51 @@ public class MigrationAppUI extends JFrame {
         return row;
     }
 
+    private JPanel createLabeledFieldWithButtonRow(
+            String labelText,
+            JTextField field,
+            JButton button,
+            int labelWidth
+    ) {
+        JPanel row = new JPanel(new BorderLayout(8, 0));
+        row.setOpaque(false);
+        row.setAlignmentX(Component.LEFT_ALIGNMENT);
+
+        JLabel label = makeOptionLabel(labelText);
+        label.setPreferredSize(new Dimension(labelWidth, 26));
+
+        JPanel fieldAndButton = new JPanel(new BorderLayout(6, 0));
+        fieldAndButton.setOpaque(false);
+        fieldAndButton.add(field, BorderLayout.CENTER);
+        fieldAndButton.add(button, BorderLayout.EAST);
+
+        row.add(label, BorderLayout.WEST);
+        row.add(fieldAndButton, BorderLayout.CENTER);
+        return row;
+    }
+
+    private void chooseInsertSqlFolderAction() {
+        JFileChooser chooser = new JFileChooser();
+        chooser.setDialogTitle("Select Insert SQL Export Folder");
+        chooser.setFileSelectionMode(JFileChooser.DIRECTORIES_ONLY);
+        chooser.setAcceptAllFileFilterUsed(false);
+
+        if (exportInsertSqlDirField != null) {
+            String currentPath = exportInsertSqlDirField.getText();
+            if (currentPath != null && !currentPath.isBlank()) {
+                chooser.setCurrentDirectory(new java.io.File(currentPath.trim()));
+            }
+        }
+
+        int option = chooser.showOpenDialog(this);
+        if (option == JFileChooser.APPROVE_OPTION && exportInsertSqlDirField != null) {
+            java.io.File selectedFolder = chooser.getSelectedFile();
+            if (selectedFolder != null) {
+                exportInsertSqlDirField.setText(selectedFolder.getAbsolutePath());
+            }
+        }
+    }
+
     private JLabel makeOptionLabel(String text) {
         JLabel label = new JLabel(text);
         label.setFont(UI_FONT);
@@ -858,6 +938,10 @@ public class MigrationAppUI extends JFrame {
         boolean truncateTarget = chkTruncateTarget.isSelected();
         boolean copyNewOnly = chkCopyNewOnly.isSelected();
         boolean copyOnlyTargetEmptyTables = chkCopyOnlyTargetEmptyTables.isSelected();
+        boolean exportInsertSqlFiles = chkExportInsertSqlFiles != null && chkExportInsertSqlFiles.isSelected();
+        String exportInsertSqlDir = exportInsertSqlDirField == null
+            ? "migration-sql-export"
+            : exportInsertSqlDirField.getText();
 
         Integer limitRows = parseIntField(limitDataField, 0, "Limit");
         int batchSize = parseIntField(batchSizeField, 1000, "Batch size");
@@ -935,6 +1019,10 @@ public class MigrationAppUI extends JFrame {
         appendLog("Truncate: " + truncateTarget
             + " | CopyNewOnly: " + copyNewOnly
             + " | CopyOnlyTargetEmptyTables: " + copyOnlyTargetEmptyTables);
+        appendLog("Export INSERT SQL: enabled=" + exportInsertSqlFiles
+            + " | folder=" + ((exportInsertSqlDir == null || exportInsertSqlDir.isBlank())
+            ? "migration-sql-export"
+            : exportInsertSqlDir.trim()));
         appendLog("Retry: enabled=" + retryEnabled + " attempts=" + retryMaxAttempts
                 + " delay=" + retryDelayMs + "ms backoff=" + retryBackoff);
         appendLog("Resume: enabled=" + resumeEnabled + " file=" + (resumeEnabled ? resumeStateFile : "N/A"));
@@ -957,6 +1045,8 @@ public class MigrationAppUI extends JFrame {
                 truncateTarget,
                 copyNewOnly,
                 copyOnlyTargetEmptyTables,
+                exportInsertSqlFiles,
+                exportInsertSqlDir,
                 limitRows,
                 includeTables,
                 excludeTables,
@@ -1404,3 +1494,5 @@ public class MigrationAppUI extends JFrame {
         SwingUtilities.invokeLater(() -> new MigrationAppUI().setVisible(true));
     }
 }
+
+

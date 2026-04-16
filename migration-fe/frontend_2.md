@@ -284,7 +284,7 @@ const addLog = (message) => {
 ### Điểm nổi bật trong kiến trúc này:
 1.  **Reactive State (`reactive` & `ref`):** Thay vì quản lý dữ liệu lỏng lẻo, `sourceDb` và `targetDb` được nhóm thành các đối tượng `reactive`. Nhờ `v-model`, bất kỳ ký tự nào bạn gõ trên màn hình đều tự động cập nhật vào đối tượng này mà không cần viết hàm lắng nghe sự kiện (`onChange`).
 2.  **Bóc tách Luồng (Decoupling):**
-    * **Axios:** Chỉ chịu trách nhiệm kích hoạt (Trigger) quá trình và nhận xác nhận ban đầu.
+    * **Axios:** Chỉ chịu trách nhiệm kích hoạt (Trigger) và nhận xác nhận ban đầu.
     * **WebSocket:** Đảm nhận hoàn toàn việc lắng nghe trạng thái nền (Background Status). Nếu bạn F5 lại trang, chỉ cần viết thêm một chút logic gọi API `GET /api/status`, component sẽ kết nối lại WebSocket và lấy đúng % đang chạy mà không làm hỏng tiến trình trên Server.
 3.  **Cuộn tự động (`nextTick`):** Giống hệt behavior của ứng dụng Desktop, mỗi khi có log mới, `nextTick` chờ Vue render dòng chữ đó ra HTML rồi mới thực hiện đẩy thanh cuộn xuống cuối cùng.
 

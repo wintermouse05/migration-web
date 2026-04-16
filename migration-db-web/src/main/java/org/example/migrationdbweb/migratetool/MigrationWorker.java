@@ -1,8 +1,17 @@
 package org.example.migrationdbweb.migratetool;
+import java.io.BufferedWriter;
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.nio.file.StandardOpenOption;
 import java.sql.Connection;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
+import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
@@ -37,6 +46,8 @@ public class MigrationWorker extends SwingWorker<Void, String> {
     private final boolean truncateTarget;
     private final boolean copyNewOnly;
     private final boolean copyOnlyTargetEmptyTables;
+    private final boolean exportInsertSqlFiles;
+    private final String exportInsertSqlDir;
     private final Integer limitRows;
     private final Set<String> includeTables;
     private final Set<String> excludeTables;
@@ -72,6 +83,8 @@ public class MigrationWorker extends SwingWorker<Void, String> {
             boolean truncateTarget,
             boolean copyNewOnly,
             boolean copyOnlyTargetEmptyTables,
+            boolean exportInsertSqlFiles,
+            String exportInsertSqlDir,
             Integer limitRows,
             Set<String> includeTables,
             Set<String> excludeTables,
@@ -97,6 +110,8 @@ public class MigrationWorker extends SwingWorker<Void, String> {
         this.truncateTarget = truncateTarget;
         this.copyNewOnly = copyNewOnly;
         this.copyOnlyTargetEmptyTables = copyOnlyTargetEmptyTables;
+        this.exportInsertSqlFiles = exportInsertSqlFiles;
+        this.exportInsertSqlDir = exportInsertSqlDir == null ? "migration-sql-export" : exportInsertSqlDir.trim();
         this.limitRows = (limitRows != null && limitRows > 0) ? limitRows : null;
         this.includeTables = normalizeTableFilter(includeTables);
         this.excludeTables = normalizeTableFilter(excludeTables);
@@ -154,7 +169,8 @@ public class MigrationWorker extends SwingWorker<Void, String> {
                 publish("Tùy chọn: truncate=" + truncateTarget
                     + ", copyNewOnly=" + copyNewOnly
                     + ", copyOnlyTargetEmptyTables=" + copyOnlyTargetEmptyTables
-                    + ", limit=" + (limitRows == null ? "ALL" : limitRows));
+                    + ", limit=" + (limitRows == null ? "ALL" : limitRows)
+                    + ", exportInsertSql=" + exportInsertSqlFiles);
                 publish("Filter bảng: include="
                         + (includeTables.isEmpty() ? "ALL" : String.join(",", includeTables))
                         + " | exclude="
@@ -191,7 +207,12 @@ public class MigrationWorker extends SwingWorker<Void, String> {
                 for (int i = 0; i < totalTables; i++) {
                     ensureNotCancelled();
                     String tableName = tableNames.get(i);
-                    TableDefinition tableDefinition = metadataExtractor.extractTableDefinition(sourceConn, sourceSchema, tableName);
+                    TableDefinition tableDefinition = metadataExtractor.extractTableDefinition(
+                            sourceConn,
+                            sourceSchema,
+                            tableName,
+                            !isDataOnly
+                    );
                     tableDefinition.setTargetSchema(targetSchema);
                     allTables.add(tableDefinition);
                     publish("  -> Đã đọc metadata bảng " + tableName);
@@ -199,27 +220,35 @@ public class MigrationWorker extends SwingWorker<Void, String> {
                 }
 
                 // ── Trích xuất SEQUENCES ────────────────────────────────
-                if (migrateSequences) {
+                if (migrateSequences && !isDataOnly) {
                     publish("Đang trích xuất SEQUENCES từ schema nguồn...");
                     allSequences = extractAllSequences(metadataExtractor, sourceConn, sourceSchema, sourceConfig.getType());
+                } else if (migrateSequences) {
+                    publish("Bo qua trich xuat SEQUENCES do chon che do Data Only.");
                 }
 
                 // ── Trích xuất INDEXES (cho các bảng đã chọn) ─────────
-                if (migrateIndexes) {
+                if (migrateIndexes && !isDataOnly) {
                     publish("Đang trích xuất INDEXES từ schema nguồn...");
                     allIndexes = extractAllIndexes(metadataExtractor, sourceConn, sourceSchema, sourceConfig.getType(), tableNames);
+                } else if (migrateIndexes) {
+                    publish("Bo qua trich xuat INDEXES do chon che do Data Only.");
                 }
 
                 // ── Trích xuất FUNCTIONS / PROCEDURES ─────────────────
-                if (migrateFunctions) {
+                if (migrateFunctions && !isDataOnly) {
                     publish("Đang trích xuất FUNCTIONS/PROCEDURES từ schema nguồn...");
                     allFunctions = extractAllFunctions(metadataExtractor, sourceConn, sourceSchema, sourceConfig.getType());
+                } else if (migrateFunctions) {
+                    publish("Bo qua trich xuat FUNCTIONS/PROCEDURES do chon che do Data Only.");
                 }
 
                 // ── Trích xuất TRIGGERS (cho các bảng đã chọn) ──────
-                if (migrateTriggers) {
+                if (migrateTriggers && !isDataOnly) {
                     publish("Đang trích xuất TRIGGERS từ schema nguồn...");
                     allTriggers = extractAllTriggers(metadataExtractor, sourceConn, sourceSchema, sourceConfig.getType(), tableNames);
+                } else if (migrateTriggers) {
+                    publish("Bo qua trich xuat TRIGGERS do chon che do Data Only.");
                 }
 
                 // ── Trích xuất VIEWS (với topological sort) ────────
@@ -287,13 +316,17 @@ public class MigrationWorker extends SwingWorker<Void, String> {
                         }
                     }
 
+                        DataTransferService.InsertSqlExportOptions insertSqlExportOptions =
+                            resolveInsertSqlExportOptions(isStructureOnly);
+
                     runDataMigrationPhaseMultiThread(
                             manager,
                             sourcePoolId,
                             targetPoolId,
                             sqlGenerator,
                             allTables,
-                            checkpointStore
+                            checkpointStore,
+                            insertSqlExportOptions
                     );
                 } else {
                     publish("Bo qua buoc chuyen du lieu do chon che do Structure Only.");
@@ -725,7 +758,8 @@ public class MigrationWorker extends SwingWorker<Void, String> {
             String targetPoolId,
             SqlGenerator sqlGenerator,
             List<TableDefinition> allTables,
-            MigrationCheckpointStore checkpointStore
+            MigrationCheckpointStore checkpointStore,
+            DataTransferService.InsertSqlExportOptions insertSqlExportOptions
     ) throws SQLException {
         List<TableMigrationPlan> plans = buildTableMigrationPlans(manager, sourcePoolId, allTables);
         if (plans.isEmpty()) {
@@ -786,6 +820,7 @@ public class MigrationWorker extends SwingWorker<Void, String> {
         SQLException firstFailure = null;
         int completed = 0;
         int totalSubmitted = runnablePlans.size();
+        Map<String, List<String>> exportedSqlFilesByTable = new LinkedHashMap<>();
 
         for (Map.Entry<Integer, List<TableMigrationPlan>> levelEntry : plansByLevel.entrySet()) {
             ensureNotCancelled();
@@ -833,7 +868,8 @@ public class MigrationWorker extends SwingWorker<Void, String> {
                                     table,
                                     effectiveCopyNewOnly,
                                     checkpointStore,
-                                    startOffset
+                                    startOffset,
+                                    insertSqlExportOptions
                             );
 
                             if (checkpointStore != null) {
@@ -848,7 +884,8 @@ public class MigrationWorker extends SwingWorker<Void, String> {
                                     tableName,
                                     result.getTransferredRows(),
                                     result.getSkippedRows(),
-                                    result.isLimitReached()
+                                    result.isLimitReached(),
+                                    result.getExportedSqlFiles()
                             );
                         } catch (SQLException | RuntimeException ex) {
                             SQLException sqlException = extractSqlException(ex);
@@ -881,6 +918,9 @@ public class MigrationWorker extends SwingWorker<Void, String> {
                                 + " | copied=" + outcome.transferredRows()
                                 + " | skipped=" + outcome.skippedRows()
                                 + (outcome.limitReached() ? " | dat nguong limit" : ""));
+                        if (!outcome.exportedSqlFiles().isEmpty()) {
+                            exportedSqlFilesByTable.put(outcome.tableName(), outcome.exportedSqlFiles());
+                        }
                     }
 
                     completed++;
@@ -907,6 +947,10 @@ public class MigrationWorker extends SwingWorker<Void, String> {
 
         if (firstFailure != null) {
             throw firstFailure;
+        }
+
+        if (insertSqlExportOptions != null && !exportedSqlFilesByTable.isEmpty()) {
+            writeOracleAllScript(insertSqlExportOptions.outputDirectory(), runnablePlans, exportedSqlFilesByTable);
         }
     }
 
@@ -1048,6 +1092,7 @@ public class MigrationWorker extends SwingWorker<Void, String> {
             int transferredRows,
             int skippedRows,
             boolean limitReached,
+            List<String> exportedSqlFiles,
             boolean skippedTable,
             boolean success,
             String errorMessage
@@ -1056,9 +1101,19 @@ public class MigrationWorker extends SwingWorker<Void, String> {
                 String tableName,
                 int transferredRows,
                 int skippedRows,
-                boolean limitReached
+            boolean limitReached,
+            List<String> exportedSqlFiles
         ) {
-            return new TableTransferOutcome(tableName, transferredRows, skippedRows, limitReached, false, true, null);
+            return new TableTransferOutcome(
+                tableName,
+                transferredRows,
+                skippedRows,
+                limitReached,
+                exportedSqlFiles == null ? List.of() : List.copyOf(exportedSqlFiles),
+                false,
+                true,
+                null
+            );
         }
 
         private static TableTransferOutcome failed(String tableName, String errorMessage) {
@@ -1067,6 +1122,7 @@ public class MigrationWorker extends SwingWorker<Void, String> {
                     0,
                     0,
                     false,
+                List.of(),
                     false,
                     false,
                     errorMessage == null ? "unknown error" : errorMessage
@@ -1079,6 +1135,7 @@ public class MigrationWorker extends SwingWorker<Void, String> {
                     0,
                     0,
                     false,
+                    List.of(),
                     true,
                     true,
                     errorMessage == null ? "ORA-00942: table or view does not exist" : errorMessage
@@ -1116,7 +1173,8 @@ public class MigrationWorker extends SwingWorker<Void, String> {
             TableDefinition table,
             boolean effectiveCopyNewOnly,
             MigrationCheckpointStore checkpointStore,
-            int startOffset
+            int startOffset,
+            DataTransferService.InsertSqlExportOptions insertSqlExportOptions
     ) throws SQLException {
         int attempts = retryPolicy.resolveAttempts();
         int currentOffset = Math.max(0, startOffset);
@@ -1144,6 +1202,7 @@ public class MigrationWorker extends SwingWorker<Void, String> {
                         limitRows,
                         effectiveCopyNewOnly,
                         currentOffset,
+                        insertSqlExportOptions,
                         (tableName, justTransferred, totalTransferred, totalSkipped) ->
                         {
                             if (checkpointStore != null) {
@@ -1172,6 +1231,79 @@ public class MigrationWorker extends SwingWorker<Void, String> {
         }
 
         throw new SQLException("Không thể hoàn tất migrate cho bảng " + table.getTableName());
+    }
+
+    private DataTransferService.InsertSqlExportOptions resolveInsertSqlExportOptions(boolean structureOnly) throws SQLException {
+        if (!exportInsertSqlFiles || structureOnly) {
+            return null;
+        }
+
+        if (targetConfig == null || targetConfig.getType() != DatabaseType.ORACLE) {
+            publish("[WARN] Export INSERT SQL chi ho tro target Oracle. Option nay se bi bo qua.");
+            return null;
+        }
+
+        String baseDir = exportInsertSqlDir == null || exportInsertSqlDir.isBlank()
+                ? "migration-sql-export"
+                : exportInsertSqlDir;
+        Path basePath = Paths.get(baseDir);
+        if (!basePath.isAbsolute()) {
+            basePath = Paths.get(System.getProperty("user.dir")).resolve(basePath).normalize();
+        }
+
+        String runFolder = "run_" + DateTimeFormatter.ofPattern("yyyyMMdd_HHmmss").format(LocalDateTime.now());
+        Path runOutputPath = basePath.resolve(runFolder);
+
+        try {
+            Files.createDirectories(runOutputPath);
+        } catch (IOException e) {
+            throw new SQLException("Khong the tao thu muc export INSERT SQL: " + runOutputPath, e);
+        }
+
+        publish("Export INSERT SQL da bat. Output folder: " + runOutputPath.toAbsolutePath());
+        return new DataTransferService.InsertSqlExportOptions(runOutputPath, 100_000, 1_000);
+    }
+
+    private void writeOracleAllScript(
+            Path outputDirectory,
+            List<TableMigrationPlan> orderedPlans,
+            Map<String, List<String>> exportedSqlFilesByTable
+    ) throws SQLException {
+        if (outputDirectory == null) {
+            return;
+        }
+
+        Path allScriptPath = outputDirectory.resolve("all.sql");
+        try (BufferedWriter writer = Files.newBufferedWriter(
+                allScriptPath,
+                StandardCharsets.UTF_8,
+                StandardOpenOption.CREATE,
+                StandardOpenOption.TRUNCATE_EXISTING,
+                StandardOpenOption.WRITE
+        )) {
+            writer.write("SET DEFINE OFF;");
+            writer.newLine();
+            writer.newLine();
+
+            for (TableMigrationPlan plan : orderedPlans) {
+                List<String> tableFiles = exportedSqlFilesByTable.get(plan.table().getTableName());
+                if (tableFiles == null || tableFiles.isEmpty()) {
+                    continue;
+                }
+
+                writer.write("PROMPT Running scripts for table " + plan.table().getTableName());
+                writer.newLine();
+                for (String fileName : tableFiles) {
+                    writer.write("@" + fileName);
+                    writer.newLine();
+                }
+                writer.newLine();
+            }
+        } catch (IOException e) {
+            throw new SQLException("Khong the ghi file all.sql tai " + allScriptPath, e);
+        }
+
+        publish("Da tao file all.sql: " + allScriptPath.toAbsolutePath());
     }
 
     private static boolean isRetryableException(SQLException e) {
@@ -1263,12 +1395,25 @@ public class MigrationWorker extends SwingWorker<Void, String> {
         return normalizeOracleRawDdlForJdbc(remapped);
     }
 
+    private static String prepareOracleRawRoutineDdl(String ddl, String sourceSchema, String targetSchema) {
+        String remapped = OracleDialect.remapSchemaPrefixSafely(ddl, sourceSchema, targetSchema);
+        return normalizeOracleRawRoutineDdlForJdbc(remapped);
+    }
+
     private static String normalizeOracleRawDdlForJdbc(String ddl) {
         String normalized = ddl == null ? "" : ddl.trim();
         while (normalized.endsWith("/")) {
             normalized = normalized.substring(0, normalized.length() - 1).trim();
         }
         while (normalized.endsWith(";")) {
+            normalized = normalized.substring(0, normalized.length() - 1).trim();
+        }
+        return normalized;
+    }
+
+    private static String normalizeOracleRawRoutineDdlForJdbc(String ddl) {
+        String normalized = ddl == null ? "" : ddl.trim();
+        while (normalized.endsWith("/")) {
             normalized = normalized.substring(0, normalized.length() - 1).trim();
         }
         return normalized;
@@ -1612,7 +1757,7 @@ public class MigrationWorker extends SwingWorker<Void, String> {
                         && fn.getDdlText() != null
                         && !fn.getDdlText().isBlank()) {
                     try {
-                        String directDdl = prepareOracleRawDdl(fn.getDdlText(), fn.getSourceSchema(), fn.getTargetSchema());
+                        String directDdl = prepareOracleRawRoutineDdl(fn.getDdlText(), fn.getSourceSchema(), fn.getTargetSchema());
                         stmt.execute(normalizeRoutineSqlForJdbc(directDdl, targetDialect));
                         publish("  -> Da tao " + fn.getFunctionType() + " (DDL goc): " + fn.getFunctionName());
                     } catch (SQLException e) {
@@ -1692,7 +1837,7 @@ public class MigrationWorker extends SwingWorker<Void, String> {
                         && trig.getDdlText() != null
                         && !trig.getDdlText().isBlank()) {
                     try {
-                        String directDdl = prepareOracleRawDdl(trig.getDdlText(), trig.getSourceSchema(), trig.getTargetSchema());
+                        String directDdl = prepareOracleRawRoutineDdl(trig.getDdlText(), trig.getSourceSchema(), trig.getTargetSchema());
                         stmt.execute(normalizeRoutineSqlForJdbc(directDdl, targetDialect));
                         publish("  -> Da tao trigger (DDL goc): " + trig.getTriggerName());
                     } catch (SQLException e) {
@@ -1970,8 +2115,6 @@ public class MigrationWorker extends SwingWorker<Void, String> {
             }
         }
     }
-
-
 
     /**
      * Transform view body -- schema replacement + Oracle to PostgreSQL transformation.
