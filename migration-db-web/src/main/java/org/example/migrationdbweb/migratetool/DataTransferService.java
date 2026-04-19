@@ -369,7 +369,7 @@ public class DataTransferService {
                     targetPstmt.addBatch();
                     pendingBatchRows.add(rowValues);
                     if (insertScriptWriter != null) {
-                        pendingBatchSql.add(buildOracleInsertSql(table, rowValues));
+                        pendingBatchSql.add(buildOracleInsertSql(table, rowValues, useMergeOrUpsert));
                     }
                     currentBatchCount++;
                     totalTransferred++;
@@ -511,7 +511,7 @@ public class DataTransferService {
                         rowValues[i - 1] = rs.getObject(i);
                     }
 
-                    pendingBatchSql.add(buildOracleInsertSql(table, rowValues));
+                    pendingBatchSql.add(buildOracleInsertSql(table, rowValues, false));
                     currentBatchCount++;
                     totalTransferred++;
 
@@ -580,10 +580,44 @@ public class DataTransferService {
         }
     }
 
-    private static String buildOracleInsertSql(TableDefinition table, Object[] rowValues) throws SQLException {
+    private static String buildOracleInsertSql(TableDefinition table, Object[] rowValues, boolean useMerge) throws SQLException {
         List<ColumnDefinition> columns = table.getColumns();
         if (rowValues == null || rowValues.length != columns.size()) {
             throw new SQLException("Cannot build Oracle INSERT SQL due to mismatched row values.");
+        }
+
+        if (useMerge && !table.getPrimaryKeys().isEmpty()) {
+            StringBuilder sql = new StringBuilder();
+            sql.append("MERGE INTO ");
+            sql.append(buildQualifiedOracleTableName(table));
+            sql.append(" t USING (SELECT ");
+            for (int i = 0; i < columns.size(); i++) {
+                if (i > 0) sql.append(", ");
+                sql.append(toOracleSqlLiteral(rowValues[i], columns.get(i)));
+                sql.append(" AS ");
+                sql.append(quoteOracleIdentifier(columns.get(i).getName()));
+            }
+            sql.append(" FROM DUAL) s ON (");
+
+            List<String> pks = table.getPrimaryKeys();
+            for (int i = 0; i < pks.size(); i++) {
+                if (i > 0) sql.append(" AND ");
+                String quotedPk = quoteOracleIdentifier(pks.get(i));
+                sql.append("t.").append(quotedPk).append(" = s.").append(quotedPk);
+            }
+
+            sql.append(") WHEN NOT MATCHED THEN INSERT (");
+            for (int i = 0; i < columns.size(); i++) {
+                if (i > 0) sql.append(", ");
+                sql.append(quoteOracleIdentifier(columns.get(i).getName()));
+            }
+            sql.append(") VALUES (");
+            for (int i = 0; i < columns.size(); i++) {
+                if (i > 0) sql.append(", ");
+                sql.append("s.").append(quoteOracleIdentifier(columns.get(i).getName()));
+            }
+            sql.append(");");
+            return sql.toString();
         }
 
         StringBuilder sql = new StringBuilder();
