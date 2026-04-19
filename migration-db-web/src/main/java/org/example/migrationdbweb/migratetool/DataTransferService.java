@@ -262,11 +262,26 @@ public class DataTransferService {
 
         // Luon ORDER BY PK neu bang co PK de thu tu doc on dinh giua cac lan retry/resume.
         String selectSql = sqlGenerator.buildSelectSql(table, hasPrimaryKey);
-        String insertSql = sqlGenerator.buildInsertSql(table);
+
+        // MERGE/UPSERT optimization: khi copyNewOnly=true và target hỗ trợ MERGE (Oracle)
+        // hoặc ON CONFLICT (PostgreSQL), dùng DB-native dedup thay vì per-row PK check.
+        // Điều này loại bỏ N+1 SELECT queries (1 query/row → 0 queries).
+        boolean useMergeOrUpsert = copyNewOnly && sqlGenerator.canUseMergeOrUpsert(table);
+        String insertSql;
         String existsByPkSql = null;
         int[] pkColumnIndexes = new int[0];
 
-        if (copyNewOnly && !table.getPrimaryKeys().isEmpty()) {
+        if (useMergeOrUpsert && sqlGenerator.getTargetDialect() instanceof OracleDialect) {
+            // Oracle: dùng MERGE INTO ... WHEN NOT MATCHED THEN INSERT
+            insertSql = sqlGenerator.buildMergeInsertSql(table);
+        } else {
+            // PostgreSQL: buildInsertSql() đã có ON CONFLICT DO NOTHING
+            // Hoặc: copyNewOnly=false → INSERT bình thường
+            insertSql = sqlGenerator.buildInsertSql(table);
+        }
+
+        // Fallback: nếu target không hỗ trợ MERGE/UPSERT, vẫn dùng per-row PK check
+        if (copyNewOnly && !useMergeOrUpsert && !table.getPrimaryKeys().isEmpty()) {
             existsByPkSql = sqlGenerator.buildExistsByPrimaryKeySql(table);
             pkColumnIndexes = resolvePkIndexes(table);
         }
@@ -279,7 +294,8 @@ public class DataTransferService {
         sourceConn.setAutoCommit(false);
         targetConn.setAutoCommit(false);
 
-        System.out.println("Starting data transfer for table: " + table.getTableName());
+        System.out.println("Starting data transfer for table: " + table.getTableName()
+                + (useMergeOrUpsert ? " [MERGE/UPSERT mode]" : ""));
 
         // Sử dụng TYPE_FORWARD_ONLY và CONCUR_READ_ONLY đềEtối ưu hóa bềEnhềEkhi đọc
            try (OracleInsertScriptWriter insertScriptWriter = createOracleInsertScriptWriter(
@@ -291,11 +307,10 @@ public class DataTransferService {
              PreparedStatement targetPstmt = targetConn.prepareStatement(insertSql);
              PreparedStatement existsByPkStmt = existsByPkSql == null ? null : targetConn.prepareStatement(existsByPkSql)) {
 
-            // Cấu hình Fetch Size: Số lượng row tải về RAM mỗi lần (Tránh OOM).
-            // Fetch Size NHỎ HƠN batch size — fetch về ít rows để giảm memory Oracle server,
-            // trong khi batch INSERT vẫn giữ batchSize lớn để tối ưu throughput.
-            // Oracle JDBC mặc định fetchSize = 10, giá trị hợp lý: 100–500.
-            int fetchSize = Math.min(500, Math.max(100, safeBatchSize / 10));
+            // Cấu hình Fetch Size = batchSize để 1 lần fetch đủ data cho 1 batch INSERT.
+            // Giảm roundtrip đọc source: fetchSize cũ = batchSize/10 → 10 roundtrip/batch.
+            // Cap tại 5000 để tránh memory pressure trên Oracle server.
+            int fetchSize = Math.min(5000, Math.max(100, safeBatchSize));
             sourceStmt.setFetchSize(fetchSize);
 
             try (ResultSet rs = sourceStmt.executeQuery(selectSql)) {
@@ -324,6 +339,8 @@ public class DataTransferService {
                         break;
                     }
 
+                    // Per-row PK check: chỉ dùng khi target không hỗ trợ MERGE/UPSERT.
+                    // Khi useMergeOrUpsert=true, existsByPkStmt luôn null → skip block này.
                     if (existsByPkStmt != null && rowExistsByPrimaryKey(rs, table, existsByPkStmt, pkColumnIndexes)) {
                         // Resume offset is persisted from totalTransferred, so skipped rows
                         // must also advance this counter to keep offset aligned.
@@ -463,7 +480,7 @@ public class DataTransferService {
              );
              Statement sourceStmt = sourceConn.createStatement(ResultSet.TYPE_FORWARD_ONLY, ResultSet.CONCUR_READ_ONLY)) {
 
-            int fetchSize = Math.min(500, Math.max(100, safeBatchSize / 10));
+            int fetchSize = Math.min(5000, Math.max(100, safeBatchSize));
             sourceStmt.setFetchSize(fetchSize);
 
             try (ResultSet rs = sourceStmt.executeQuery(selectSql)) {

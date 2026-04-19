@@ -26,6 +26,10 @@ public class SqlGenerator {
         this.targetSchema = normalizeSchema(targetSchema);
     }
 
+    public SqlDialect getTargetDialect() {
+        return targetDialect;
+    }
+
     // Tạo lệnh SELECT từ Source
     public String buildSelectSql(TableDefinition table) {
         return buildSelectSql(table, false);
@@ -124,6 +128,65 @@ public class SqlGenerator {
                 + qualifyTableName(targetDialect, targetSchema, table.getTableName())
                 + " WHERE "
                 + whereClause;
+    }
+
+    /**
+     * Build Oracle MERGE statement for copyNewOnly mode.
+     * Replaces per-row PK existence check + INSERT with a single MERGE:
+     *
+     *   MERGE INTO target t
+     *   USING (SELECT ? AS c1, ? AS c2, ... FROM DUAL) s
+     *   ON (t.pk1 = s.pk1 [AND t.pk2 = s.pk2])
+     *   WHEN NOT MATCHED THEN INSERT (c1, c2, ...) VALUES (s.c1, s.c2, ...)
+     *
+     * This eliminates N+1 SELECT queries when copyNewOnly=true on Oracle target.
+     */
+    public String buildMergeInsertSql(TableDefinition table) {
+        List<ColumnDefinition> columns = table.getColumns();
+        List<String> primaryKeys = table.getPrimaryKeys();
+
+        if (primaryKeys.isEmpty()) {
+            throw new IllegalArgumentException(
+                    "Table " + table.getTableName() + " has no PK — cannot build MERGE statement."
+            );
+        }
+
+        String qualifiedTarget = qualifyTableName(targetDialect, targetSchema, table.getTableName());
+
+        // USING (SELECT ? AS "COL1", ? AS "COL2", ... FROM DUAL) s
+        String usingColumns = columns.stream()
+                .map(c -> "? AS " + targetDialect.quoteIdentifier(c.getName()))
+                .collect(Collectors.joining(", "));
+
+        // ON (t."PK1" = s."PK1" AND t."PK2" = s."PK2")
+        String onClause = primaryKeys.stream()
+                .map(pk -> "t." + targetDialect.quoteIdentifier(pk)
+                        + " = s." + targetDialect.quoteIdentifier(pk))
+                .collect(Collectors.joining(" AND "));
+
+        // WHEN NOT MATCHED THEN INSERT (col1, col2, ...) VALUES (s.col1, s.col2, ...)
+        String insertCols = columns.stream()
+                .map(c -> targetDialect.quoteIdentifier(c.getName()))
+                .collect(Collectors.joining(", "));
+        String insertVals = columns.stream()
+                .map(c -> "s." + targetDialect.quoteIdentifier(c.getName()))
+                .collect(Collectors.joining(", "));
+
+        return "MERGE INTO " + qualifiedTarget + " t"
+                + " USING (SELECT " + usingColumns + " FROM DUAL) s"
+                + " ON (" + onClause + ")"
+                + " WHEN NOT MATCHED THEN INSERT (" + insertCols + ") VALUES (" + insertVals + ")";
+    }
+
+    /**
+     * Returns true if the target dialect supports MERGE (Oracle) or UPSERT (PostgreSQL ON CONFLICT).
+     * When true, DataTransferService can skip per-row PK existence checks for copyNewOnly mode.
+     */
+    public boolean canUseMergeOrUpsert(TableDefinition table) {
+        if (table.getPrimaryKeys().isEmpty()) {
+            return false;
+        }
+        return targetDialect instanceof OracleDialect || targetDialect instanceof PostgresDialect;
     }
 
     private static String normalizeSchema(String schema) {

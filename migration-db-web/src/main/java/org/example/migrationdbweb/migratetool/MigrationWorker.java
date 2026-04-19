@@ -205,23 +205,15 @@ public class MigrationWorker extends SwingWorker<Void, String> {
                     return null;
                 }
 
-                publish("Tìm thấy " + tableNames.size() + " bảng. Đang trích xuất cấu trúc chi tiết...");
-                List<TableDefinition> allTables = new ArrayList<>();
-                int totalTables = tableNames.size();
-                for (int i = 0; i < totalTables; i++) {
-                    ensureNotCancelled();
-                    String tableName = tableNames.get(i);
-                    TableDefinition tableDefinition = metadataExtractor.extractTableDefinition(
-                            sourceConn,
-                            sourceSchema,
-                            tableName,
-                            !isDataOnly
-                    );
-                    tableDefinition.setTargetSchema(targetSchema);
-                    allTables.add(tableDefinition);
-                    publish("  -> Đã đọc metadata bảng " + tableName);
-                    setProgress(5 + (int) (((i + 1) / (float) totalTables) * 20));
+                publish("Tìm thấy " + tableNames.size() + " bảng. Đang trích xuất cấu trúc chi tiết (batch)...");
+                List<TableDefinition> allTables = metadataExtractor.extractAllTableDefinitions(
+                        sourceConn, sourceSchema, tableNames, !isDataOnly
+                );
+                for (TableDefinition td : allTables) {
+                    td.setTargetSchema(targetSchema);
                 }
+                publish("  -> Đã đọc metadata " + allTables.size() + " bảng (batch mode).");
+                setProgress(25);
 
                 // ── Trích xuất SEQUENCES ────────────────────────────────
                 if (migrateSequences && !isDataOnly) {
@@ -272,9 +264,8 @@ public class MigrationWorker extends SwingWorker<Void, String> {
                 allTables = deduplicateTablesForTarget(allTables, targetDialect);
                 allTables = TableDependencySortUtil.sortByForeignKeyDependency(allTables);
                 publish("Da sap xep thu tu bang theo phu thuoc FK (parent truoc, child sau).");
-                totalTables = allTables.size();
 
-                if (totalTables == 0) {
+                if (allTables.isEmpty()) {
                     publish("Không còn bảng hợp lệ để migrate sau khi đối chiếu tên bảng trên target.");
                     setProgress(100);
                     return null;

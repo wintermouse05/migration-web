@@ -42,6 +42,432 @@ public class MetadataExtractor {
 
     }
 
+    /**
+     * Batch metadata extraction — fetches columns, PKs, and FKs for ALL tables in a schema
+     * using a minimal number of DB roundtrips (typically 3-5 instead of 3×N).
+     *
+     * This method does NOT fetch raw DDL (DBMS_METADATA) — that is still per-table
+     * because Oracle's API does not support batch DDL extraction.
+     *
+     * @param conn              source DB connection
+     * @param schema            source schema name
+     * @param tableNames        list of table names to extract metadata for
+     * @param includeStructuralMetadata  if true, also extract raw DDL per-table (slower, per-table)
+     * @return list of TableDefinitions in the same order as tableNames
+     */
+    public List<TableDefinition> extractAllTableDefinitions(
+            Connection conn,
+            String schema,
+            List<String> tableNames,
+            boolean includeStructuralMetadata
+    ) throws SQLException {
+        if (tableNames == null || tableNames.isEmpty()) {
+            return new ArrayList<>();
+        }
+
+        Set<String> tableNameSet = new HashSet<>();
+        for (String name : tableNames) {
+            if (name != null) {
+                tableNameSet.add(name);
+            }
+        }
+
+        DatabaseType dbType = detectDatabaseType(conn);
+
+        // ── Phase 1: Batch fetch ALL columns with wildcard ──
+        // metaData.getColumns(null, schema, "%", "%") is JDBC-spec compliant for patterns.
+        Map<String, TableDefinition> tablesByName = new HashMap<>();
+        for (String tableName : tableNames) {
+            TableDefinition td = new TableDefinition(tableName);
+            td.setSourceSchema(schema);
+            td.setSourceDialect(dbType);
+            tablesByName.put(tableName, td);
+        }
+
+        DatabaseMetaData metaData = conn.getMetaData();
+        try (ResultSet rsColumns = metaData.getColumns(null, schema, "%", "%")) {
+            while (rsColumns.next()) {
+                String tableName = rsColumns.getString("TABLE_NAME");
+                if (!tableNameSet.contains(tableName)) {
+                    continue;
+                }
+                TableDefinition tableDef = tablesByName.get(tableName);
+                if (tableDef == null) {
+                    continue;
+                }
+
+                String colName = rsColumns.getString("COLUMN_NAME");
+                int dataType = rsColumns.getInt("DATA_TYPE");
+                String typeName = rsColumns.getString("TYPE_NAME");
+                int size = rsColumns.getInt("COLUMN_SIZE");
+                int scale = rsColumns.getInt("DECIMAL_DIGITS");
+                int nullable = rsColumns.getInt("NULLABLE");
+                String isAutoIncStr = rsColumns.getString("IS_AUTOINCREMENT");
+                boolean isNullable = (nullable == 1);
+                boolean isAutoIncrement = "YES".equalsIgnoreCase(isAutoIncStr);
+                ColumnDefinition colDef = new ColumnDefinition(
+                        colName, dataType, typeName, size, scale, isNullable, isAutoIncrement
+                );
+                tableDef.addColumn(colDef);
+            }
+        }
+
+        // ── Phase 2: Batch fetch PKs ──
+        batchFetchPrimaryKeys(conn, schema, tablesByName, tableNameSet, dbType);
+
+        // ── Phase 3: Batch fetch FKs ──
+        batchFetchForeignKeys(conn, schema, tablesByName, tableNameSet, dbType);
+
+        // ── Phase 4: Per-DB enrichments (batch where possible) ──
+        if (dbType == DatabaseType.POSTGRESQL) {
+            batchEnrichPostgresIdentityGeneration(conn, schema, tablesByName, tableNameSet);
+        }
+        if (includeStructuralMetadata && dbType == DatabaseType.ORACLE) {
+            batchEnrichOracleCharSemantics(conn, schema, tablesByName, tableNameSet);
+        }
+
+        // ── Phase 5: Per-table raw DDL (cannot batch — API limitation) ──
+        if (includeStructuralMetadata) {
+            for (String tableName : tableNames) {
+                TableDefinition tableDef = tablesByName.get(tableName);
+                if (tableDef == null) {
+                    continue;
+                }
+                enrichWithRawDdl(conn, schema, tableName, tableDef, dbType);
+            }
+        }
+
+        // Return in original order
+        List<TableDefinition> result = new ArrayList<>(tableNames.size());
+        for (String tableName : tableNames) {
+            TableDefinition td = tablesByName.get(tableName);
+            if (td != null) {
+                result.add(td);
+            }
+        }
+        return result;
+    }
+
+    /**
+     * Batch fetch primary keys for all tables using vendor-specific SQL instead of
+     * JDBC getPrimaryKeys() which does not support wildcard table names.
+     */
+    private void batchFetchPrimaryKeys(
+            Connection conn,
+            String schema,
+            Map<String, TableDefinition> tablesByName,
+            Set<String> tableNameSet,
+            DatabaseType dbType
+    ) throws SQLException {
+        if (dbType == DatabaseType.ORACLE) {
+            String sql = """
+                SELECT acc.TABLE_NAME, acc.COLUMN_NAME
+                FROM ALL_CONSTRAINTS ac
+                JOIN ALL_CONS_COLUMNS acc
+                  ON ac.CONSTRAINT_NAME = acc.CONSTRAINT_NAME
+                 AND ac.OWNER = acc.OWNER
+                WHERE ac.OWNER = ?
+                  AND ac.CONSTRAINT_TYPE = 'P'
+                ORDER BY acc.TABLE_NAME, acc.POSITION
+                """;
+            try (PreparedStatement ps = conn.prepareStatement(sql)) {
+                ps.setString(1, schema.toUpperCase(Locale.ROOT));
+                try (ResultSet rs = ps.executeQuery()) {
+                    while (rs.next()) {
+                        String tableName = rs.getString("TABLE_NAME");
+                        if (!tableNameSet.contains(tableName)) continue;
+                        TableDefinition td = tablesByName.get(tableName);
+                        if (td != null) {
+                            td.addPrimaryKey(rs.getString("COLUMN_NAME"));
+                        }
+                    }
+                }
+            }
+        } else if (dbType == DatabaseType.POSTGRESQL) {
+            String sql = """
+                SELECT tc.table_name, kcu.column_name
+                FROM information_schema.table_constraints tc
+                JOIN information_schema.key_column_usage kcu
+                  ON tc.constraint_name = kcu.constraint_name
+                 AND tc.table_schema = kcu.table_schema
+                WHERE tc.table_schema = ?
+                  AND tc.constraint_type = 'PRIMARY KEY'
+                ORDER BY tc.table_name, kcu.ordinal_position
+                """;
+            try (PreparedStatement ps = conn.prepareStatement(sql)) {
+                ps.setString(1, schema);
+                try (ResultSet rs = ps.executeQuery()) {
+                    while (rs.next()) {
+                        String tableName = rs.getString("table_name");
+                        if (!tableNameSet.contains(tableName)) continue;
+                        TableDefinition td = tablesByName.get(tableName);
+                        if (td != null) {
+                            td.addPrimaryKey(rs.getString("column_name"));
+                        }
+                    }
+                }
+            }
+        } else {
+            // Fallback: per-table JDBC API
+            DatabaseMetaData metaData = conn.getMetaData();
+            for (String tableName : tableNameSet) {
+                try (ResultSet rsPK = metaData.getPrimaryKeys(null, schema, tableName)) {
+                    TableDefinition td = tablesByName.get(tableName);
+                    while (rsPK.next() && td != null) {
+                        td.addPrimaryKey(rsPK.getString("COLUMN_NAME"));
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * Batch fetch foreign keys for all tables using vendor-specific SQL.
+     */
+    private void batchFetchForeignKeys(
+            Connection conn,
+            String schema,
+            Map<String, TableDefinition> tablesByName,
+            Set<String> tableNameSet,
+            DatabaseType dbType
+    ) throws SQLException {
+        if (dbType == DatabaseType.ORACLE) {
+            String sql = """
+                SELECT ac.TABLE_NAME,
+                       acc.COLUMN_NAME AS FK_COLUMN,
+                       ac.CONSTRAINT_NAME AS FK_NAME,
+                       rcc.TABLE_NAME AS PK_TABLE,
+                       rcc.COLUMN_NAME AS PK_COLUMN
+                FROM ALL_CONSTRAINTS ac
+                JOIN ALL_CONS_COLUMNS acc
+                  ON ac.CONSTRAINT_NAME = acc.CONSTRAINT_NAME AND ac.OWNER = acc.OWNER
+                JOIN ALL_CONSTRAINTS rc
+                  ON ac.R_CONSTRAINT_NAME = rc.CONSTRAINT_NAME AND ac.R_OWNER = rc.OWNER
+                JOIN ALL_CONS_COLUMNS rcc
+                  ON rc.CONSTRAINT_NAME = rcc.CONSTRAINT_NAME AND rc.OWNER = rcc.OWNER
+                  AND acc.POSITION = rcc.POSITION
+                WHERE ac.OWNER = ?
+                  AND ac.CONSTRAINT_TYPE = 'R'
+                ORDER BY ac.TABLE_NAME, ac.CONSTRAINT_NAME, acc.POSITION
+                """;
+            try (PreparedStatement ps = conn.prepareStatement(sql)) {
+                ps.setString(1, schema.toUpperCase(Locale.ROOT));
+                try (ResultSet rs = ps.executeQuery()) {
+                    while (rs.next()) {
+                        String tableName = rs.getString("TABLE_NAME");
+                        if (!tableNameSet.contains(tableName)) continue;
+                        TableDefinition td = tablesByName.get(tableName);
+                        if (td != null) {
+                            td.addForeignKey(new ForeignKeyDefinition(
+                                    rs.getString("FK_NAME"),
+                                    rs.getString("FK_COLUMN"),
+                                    rs.getString("PK_TABLE"),
+                                    rs.getString("PK_COLUMN")
+                            ));
+                        }
+                    }
+                }
+            }
+        } else if (dbType == DatabaseType.POSTGRESQL) {
+            String sql = """
+                SELECT
+                    tc.table_name,
+                    kcu.column_name AS fk_column,
+                    tc.constraint_name AS fk_name,
+                    ccu.table_name AS pk_table,
+                    ccu.column_name AS pk_column
+                FROM information_schema.table_constraints tc
+                JOIN information_schema.key_column_usage kcu
+                  ON tc.constraint_name = kcu.constraint_name
+                 AND tc.table_schema = kcu.table_schema
+                JOIN information_schema.constraint_column_usage ccu
+                  ON tc.constraint_name = ccu.constraint_name
+                 AND tc.table_schema = ccu.constraint_schema
+                WHERE tc.constraint_type = 'FOREIGN KEY'
+                  AND tc.table_schema = ?
+                ORDER BY tc.table_name, tc.constraint_name, kcu.ordinal_position
+                """;
+            try (PreparedStatement ps = conn.prepareStatement(sql)) {
+                ps.setString(1, schema);
+                try (ResultSet rs = ps.executeQuery()) {
+                    Set<String> seenFks = new HashSet<>();
+                    while (rs.next()) {
+                        String tableName = rs.getString("table_name");
+                        if (!tableNameSet.contains(tableName)) continue;
+                        TableDefinition td = tablesByName.get(tableName);
+                        if (td == null) continue;
+
+                        String fkName = rs.getString("fk_name");
+                        String fkColumn = rs.getString("fk_column");
+                        String dedupeKey = tableName + "|" + fkName + "|" + fkColumn;
+                        if (!seenFks.add(dedupeKey)) continue;
+
+                        td.addForeignKey(new ForeignKeyDefinition(
+                                fkName, fkColumn,
+                                rs.getString("pk_table"),
+                                rs.getString("pk_column")
+                        ));
+                    }
+                }
+            }
+        } else {
+            // Fallback: per-table JDBC API
+            DatabaseMetaData metaData = conn.getMetaData();
+            for (String tableName : tableNameSet) {
+                try (ResultSet rsFK = metaData.getImportedKeys(null, schema, tableName)) {
+                    TableDefinition td = tablesByName.get(tableName);
+                    while (rsFK.next() && td != null) {
+                        td.addForeignKey(new ForeignKeyDefinition(
+                                rsFK.getString("FK_NAME"),
+                                rsFK.getString("FKCOLUMN_NAME"),
+                                rsFK.getString("PKTABLE_NAME"),
+                                rsFK.getString("PKCOLUMN_NAME")
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * Batch enrich PostgreSQL identity generation for all tables in one query.
+     */
+    private void batchEnrichPostgresIdentityGeneration(
+            Connection conn,
+            String schema,
+            Map<String, TableDefinition> tablesByName,
+            Set<String> tableNameSet
+    ) {
+        String sql = """
+            SELECT table_name, column_name, identity_generation
+            FROM information_schema.columns
+            WHERE table_schema = ?
+              AND identity_generation IS NOT NULL
+            """;
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setString(1, schema);
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    String tableName = rs.getString("table_name");
+                    if (!tableNameSet.contains(tableName)) continue;
+                    TableDefinition td = tablesByName.get(tableName);
+                    if (td == null) continue;
+
+                    String colName = rs.getString("column_name");
+                    String generation = rs.getString("identity_generation");
+                    for (ColumnDefinition col : td.getColumns()) {
+                        if (col != null && col.getName() != null
+                                && col.getName().equalsIgnoreCase(colName)) {
+                            col.setIdentityAlways("ALWAYS".equalsIgnoreCase(generation));
+                            break;
+                        }
+                    }
+                }
+            }
+        } catch (SQLException ignored) {
+            // best-effort
+        }
+    }
+
+    /**
+     * Batch enrich Oracle CHAR/BYTE length semantics for all tables in one query.
+     */
+    private void batchEnrichOracleCharSemantics(
+            Connection conn,
+            String schema,
+            Map<String, TableDefinition> tablesByName,
+            Set<String> tableNameSet
+    ) {
+        String normalizedSchema = schema == null ? "" : schema.trim().toUpperCase(Locale.ROOT);
+        if (normalizedSchema.isBlank()) return;
+
+        String sql = """
+            SELECT TABLE_NAME, COLUMN_NAME, CHAR_USED
+            FROM ALL_TAB_COLUMNS
+            WHERE OWNER = ?
+            """;
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+            ps.setString(1, normalizedSchema);
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    String tableName = rs.getString("TABLE_NAME");
+                    if (!tableNameSet.contains(tableName)) continue;
+                    TableDefinition td = tablesByName.get(tableName);
+                    if (td == null) continue;
+
+                    String columnName = rs.getString("COLUMN_NAME");
+                    String charUsed = rs.getString("CHAR_USED");
+                    if (columnName == null) continue;
+
+                    String normalizedCol = columnName.toUpperCase(Locale.ROOT);
+                    for (ColumnDefinition col : td.getColumns()) {
+                        if (col != null && col.getName() != null
+                                && col.getName().toUpperCase(Locale.ROOT).equals(normalizedCol)
+                                && isCharacterJdbcType(col.getJdbcType())) {
+                            col.setCharLengthSemantics("C".equalsIgnoreCase(charUsed));
+                            break;
+                        }
+                    }
+                }
+            }
+        } catch (SQLException ignored) {
+            // Fall back silently — DDL will use default semantics.
+        }
+    }
+
+    /**
+     * Per-table raw DDL enrichment (cannot be batched due to API limitations).
+     * Adds DDL text and FK DDL text to the TableDefinition.
+     */
+    private void enrichWithRawDdl(
+            Connection conn,
+            String schema,
+            String tableName,
+            TableDefinition tableDef,
+            DatabaseType dbType
+    ) {
+        if (dbType == DatabaseType.ORACLE) {
+            try {
+                tableDef.setDdlText(extractOracleTableDdlViaDbmsMetadata(conn, schema, tableName));
+            } catch (SQLException ex) {
+                System.err.println("WARN: DBMS_METADATA unavailable for table "
+                        + schema + "." + tableName + ": " + ex.getMessage());
+            }
+            try {
+                for (String fkDdl : extractOracleForeignKeyDdlsViaDbmsMetadata(conn, schema, tableName)) {
+                    tableDef.addForeignKeyDdl(fkDdl);
+                }
+            } catch (SQLException ex) {
+                System.err.println("WARN: DBMS_METADATA unavailable for table FKs "
+                        + schema + "." + tableName + ": " + ex.getMessage());
+            }
+        } else if (dbType == DatabaseType.POSTGRESQL) {
+            try {
+                tableDef.setDdlText(extractPostgresTableDdl(conn, schema, tableName));
+            } catch (SQLException ex) {
+                System.err.println("WARN: Khong the trich xuat PostgreSQL table DDL cho "
+                        + schema + "." + tableName + ": " + ex.getMessage());
+            }
+            try {
+                for (String fkDdl : extractPostgresForeignKeyDdls(conn, schema, tableName)) {
+                    tableDef.addForeignKeyDdl(fkDdl);
+                }
+            } catch (SQLException ex) {
+                System.err.println("WARN: Khong the trich xuat PostgreSQL FK DDL cho "
+                        + schema + "." + tableName + ": " + ex.getMessage());
+            }
+        }
+    }
+
+    /**
+     * Detect database type from connection metadata. Used by batch extraction.
+     */
+    private static DatabaseType detectDatabaseType(Connection conn) {
+        if (isOracleConnection(conn)) return DatabaseType.ORACLE;
+        if (isPostgreSqlConnection(conn)) return DatabaseType.POSTGRESQL;
+        return null;
+    }
+
     public TableDefinition extractTableDefinition(Connection conn, String schema, String tableName) throws SQLException {
         return extractTableDefinition(conn, schema, tableName, true);
     }
