@@ -1879,6 +1879,7 @@ public class MigrationWorker extends SwingWorker<Void, String> {
                         String directDdl = prepareOracleRawRoutineDdl(fn.getDdlText(), fn.getSourceSchema(), fn.getTargetSchema());
                         stmt.execute(normalizeRoutineSqlForJdbc(directDdl, targetDialect));
                         publish("  -> Da tao " + fn.getFunctionType() + " (DDL goc): " + fn.getFunctionName());
+                        continue;
                     } catch (SQLException e) {
                         if (isFunctionAlreadyExistsError(e)) {
                             publish("  -> Bo qua " + fn.getFunctionType() + " da ton tai: " + fn.getFunctionName());
@@ -1988,6 +1989,7 @@ public class MigrationWorker extends SwingWorker<Void, String> {
                         String directDdl = prepareOracleRawRoutineDdl(trig.getDdlText(), trig.getSourceSchema(), trig.getTargetSchema());
                         stmt.execute(normalizeRoutineSqlForJdbc(directDdl, targetDialect));
                         publish("  -> Da tao trigger (DDL goc): " + trig.getTriggerName());
+                        continue;
                     } catch (SQLException e) {
                         if (isTriggerAlreadyExistsError(e)) {
                             publish("  -> Bo qua trigger da ton tai: " + trig.getTriggerName());
